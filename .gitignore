@@ -1,0 +1,9 @@
+local.settings.json
+__pycache__/
+*.pyc
+.venv/
+.python_packages/
+etenders_matches.xlsx
+.vscode/
+bin/
+obj/
