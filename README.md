@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # eTenders digest — Azure Function
 
 Fetches new eTenders OCDS releases, scores them against `pipeline.KEYWORDS`,
@@ -56,7 +55,7 @@ Set the app settings on the Function App:
 az functionapp config appsettings set -g $RG -n $FUNCAPP --settings `
   "ACS_CONNECTION_STRING=<paste connection string>" `
   "SENDER_EMAIL=<paste verified sender address>" `
-  "RECIPIENT_EMAIL=vaxenxe@gmail.com"
+  "RECIPIENT_EMAIL=kekekhaka@gmail.com"
 ```
 
 (Add more comma-separated addresses to `RECIPIENT_EMAIL` if needed.)
@@ -97,7 +96,7 @@ Or let GitHub Actions deploy on every push to `main` (see below).
    git add .
    git commit -m "Azure Function: eTenders digest with email delivery"
    git branch -M main
-   git remote add origin https://github.com/<your-username>/etenders-digest.git
+   git remote add origin https://github.com/220404773/etenders-digest.git
    git push -u origin main
    ```
 3. **Enable automatic deploys (optional, via `.github/workflows/deploy.yml` already included):**
@@ -117,7 +116,3 @@ Or let GitHub Actions deploy on every push to `main` (see below).
 
 The timer trigger cron is `0 0 6,18 * * *` (NCRONTAB, UTC) = **08:00 and 20:00 SAST**
 (South Africa has no DST, so this stays fixed year-round).
-=======
-# eTenders
-Fetches new eTenders OCDS releases 
->>>>>>> cbafb2e991589fe065ccee380b41bdc68f909ca7
