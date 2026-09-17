@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # eTenders digest — Azure Function
 
 Fetches new eTenders OCDS releases, scores them against `pipeline.KEYWORDS`,
@@ -116,3 +117,7 @@ Or let GitHub Actions deploy on every push to `main` (see below).
 
 The timer trigger cron is `0 0 6,18 * * *` (NCRONTAB, UTC) = **08:00 and 20:00 SAST**
 (South Africa has no DST, so this stays fixed year-round).
+=======
+# eTenders
+Fetches new eTenders OCDS releases 
+>>>>>>> cbafb2e991589fe065ccee380b41bdc68f909ca7
