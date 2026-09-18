@@ -13,10 +13,12 @@ BASE = "https://ocds-api.etenders.gov.za/api/OCDSReleases"
 LOOKBACK_DAYS = 5
 # The API gets noticeably slower per page as PageSize grows (roughly
 # 8s @ 100, 22s @ 200, 55s @ 500 for a 5-day recent window) - keep this
-# small enough that a page reliably finishes within REQUEST_TIMEOUT.
-PAGE_SIZE = 1750
+# small enough that a page reliably finishes within REQUEST_TIMEOUT, and
+# that MAX_RETRIES worst-case attempts still fit under host.json's
+# functionTimeout (00:10:00, the max on the Consumption plan).
+PAGE_SIZE = 1250
 MAX_PAGES = 50
-REQUEST_TIMEOUT = 180
+REQUEST_TIMEOUT = 90
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
 
