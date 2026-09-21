@@ -39,7 +39,8 @@ KEYWORDS = {
     "power automate": 7, "power apps": 7, "power platform": 7, "data lake": 9, "data ops": 8,
     "ssis": 8, "ssis developer": 8, "ssis engineer": 8, "ssis architect": 8, "playwright": 7,
     "test automation": 7, "test automation engineer": 7,"database developer": 8,
-      "database engineer": 8, "database architect": 8,
+    "database engineer": 8, "database architect": 8, "software engineer": 7, "software developer": 7,
+    "software architect": 7, "platform engineer": 7, "platform architect": 7, "platform developer": 7,
     # adjacent
     "robotics process automation": 7, "rpa": 7, "machine learning": 5, "ml": 5,
     "api": 7, "api development": 7, "api integration": 7, "api engineer": 7,
@@ -58,7 +59,28 @@ KEYWORDS = {
     "scientific and technical activities": 3,
 }
 
-PROVINCES = {"guateng", "national"}
+# Empty = nationwide. Populate with lowercase province names to narrow.
+PROVINCES = set()
+
+# The main volume control. Tender titles are opaque reference codes and the
+# descriptions are thin, so category is the only metadata that discriminates;
+# keyword scoring on metadata alone finds almost nothing.
+CATEGORIES = {
+    # unambiguously IT / data
+    "information and communication",
+    "information service activities",
+    "computer programming, consultancy and related activities",
+    "programming and broadcasting activities",
+    "supplies: computer equipment",
+    # professional / technical consulting, where data work tends to be advertised
+    "services: professional",
+    "professional, scientific and technical activities",
+    "other professional, scientific and technical activities",
+    "scientific and technical activities",
+    "activities of head offices; management consultancy activities",
+    "architectural and engineering activities; technical testing and analysis",
+    "scientific research and development",
+}
 
 # Phrases that usually mean an accreditation or track record gate.
 BLOCKER_PATTERNS = [
@@ -188,6 +210,11 @@ def build_matches(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
         prov = df["province"].fillna("").str.lower()
         df = df[prov.isin(PROVINCES) | (prov == "")]
 
-    df = df[df["score"] > 0].sort_values("score", ascending=False)
+    if CATEGORIES:
+        df = df[df["category"].fillna("").str.lower().isin(CATEGORIES)]
+
+    # Score orders the list rather than gating it: an IT-category tender with an
+    # opaque title scores zero yet is exactly what we must not drop.
+    df = df.sort_values("score", ascending=False)
     df = df.drop(columns=["closing_dt"])
     return df
