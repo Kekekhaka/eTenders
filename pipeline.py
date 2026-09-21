@@ -34,10 +34,12 @@ KEYWORDS = {
     "data governance": 8, "data quality": 8, "data steward": 8,
     "master data": 8, "data management": 8, "data integration": 9,
     "data warehouse architect": 10, "azure": 8, "databricks": 9,
-    "data factory": 9, "fabric": 7, "dashboards": 8, "reporting": 8, "data visualization": 9,
+    "Azure data factory": 9, "Microsoft fabric": 7, "dashboards": 8, "reporting": 8, "data visualization": 9,
     "reporting solutions": 8, "sql server": 8, "sql": 8, "python": 8,
     "power automate": 7, "power apps": 7, "power platform": 7, "data lake": 9, "data ops": 8,
-    "ssis": 8, "ssis developer": 8, "ssis engineer": 8, "ssis architect": 8,
+    "ssis": 8, "ssis developer": 8, "ssis engineer": 8, "ssis architect": 8, "playwright": 7,
+    "test automation": 7, "test automation engineer": 7,"database developer": 8,
+      "database engineer": 8, "database architect": 8,
     # adjacent
     "robotics process automation": 7, "rpa": 7, "machine learning": 5, "ml": 5,
     "api": 7, "api development": 7, "api integration": 7, "api engineer": 7,
@@ -110,10 +112,19 @@ def fetch_releases(date_from: str, date_to: str) -> list:
     return out
 
 
+def _compile(keyword: str) -> re.Pattern:
+    """Whole-word match, tolerating any run of whitespace inside a phrase so
+    that line-wrapped document text still matches."""
+    body = r"\s+".join(re.escape(word) for word in keyword.split())
+    return re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE)
+
+
+_KEYWORD_PATTERNS = [(k, w, _compile(k)) for k, w in KEYWORDS.items()]
+
+
 def score(text: str) -> tuple:
     """Return (total score, matched keywords) for a blob of tender text."""
-    low = text.lower()
-    hits = [(k, w) for k, w in KEYWORDS.items() if k in low]
+    hits = [(k, w) for k, w, pattern in _KEYWORD_PATTERNS if pattern.search(text)]
     return sum(w for _, w in hits), ", ".join(k for k, _ in sorted(hits, key=lambda h: -h[1]))
 
 
