@@ -13,10 +13,13 @@ app = func.FunctionApp()
 def etenders_digest(timer: func.TimerRequest) -> None:
     try:
         logging.info("Fetching eTenders releases...")
-        df = build_matches()
-        logging.info("%d scored matches found", len(df))
+        df, missing = build_matches()
+        logging.info("%d tenders found; %d date chunk(s) missing", len(df), len(missing))
 
-        send_report(df, subject=f"eTenders digest - {len(df)} match(es)")
+        subject = f"eTenders digest - {len(df)} tender(s)"
+        if missing:
+            subject += " (partial)"
+        send_report(df, subject=subject, missing=missing)
         logging.info("Email sent.")
     except Exception as exc:
         logging.exception("eTenders digest run failed")

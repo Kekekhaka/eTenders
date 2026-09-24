@@ -5,7 +5,9 @@ from pipeline import build_matches
 
 def main():
     print("Fetching releases...")
-    df = build_matches()
+    df, missing = build_matches()
+    for label, reason in missing:
+        print(f"  WARNING: {label} not covered ({reason})")
     if df.empty:
         print("Nothing returned. Widen LOOKBACK_DAYS.")
         return

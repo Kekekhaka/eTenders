@@ -11,15 +11,22 @@ import requests
 BASE = "https://ocds-api.etenders.gov.za/api/OCDSReleases"
 
 LOOKBACK_DAYS = 5
-# The API charges a large fixed cost per request and gets slower the deeper
-# you page, so one big page beats many small ones. PageSize is an upper
-# bound only: a page returns an arbitrary number of releases below it, so
-# the end of the data is an empty page, never a short one.
+# Response time scales with the number of releases returned, and the API's
+# throughput swings wildly: ~17 releases/sec when healthy, ~0.75/sec when
+# degraded. At the bad end a whole 5-day window cannot be fetched inside the
+# Consumption plan's 10-minute ceiling at any timeout, so the window is
+# fetched one day at a time, newest first, under a wall-clock budget. Runs
+# happen twice daily, so older days have already been collected by earlier
+# runs and are the right thing to drop when time runs out.
+CHUNK_DAYS = 1
+# PageSize is an upper bound only: a page returns an arbitrary number of
+# releases below it, so the end of the data is an empty page, never a short one.
 PAGE_SIZE = 2000
 MAX_PAGES = 50
-# Worst case (MAX_RETRIES attempts + backoff) must stay under host.json's
-# functionTimeout of 00:10:00, the max on the Consumption plan.
-REQUEST_TIMEOUT = 240
+# Total wall-clock allowed for fetching, leaving room under host.json's
+# functionTimeout (00:10:00, the max on Consumption) for scoring and email.
+FETCH_BUDGET_SECONDS = 420
+REQUEST_TIMEOUT = 150
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 10
 
@@ -46,17 +53,17 @@ KEYWORDS = {
     "api": 7, "api development": 7, "api integration": 7, "api engineer": 7,
     "artificial intelligence": 4, "ai": 4, "sap": 3,
     # generic buckets
-    "activities auxiliary to financial service and insurance activities": 3,
-    "architectural and engineering activities; technical testing and analysis": 3,
-    "computer programming, consultancy and related activities": 3,
-    "information service activities": 3,
-    "information and communication": 3,
-    "other professional, scientific and technical activities": 3,
-    "other service activities": 3,
-    "professional, scientific and technical activities": 3,
-    "programming and broadcasting activities": 3,
-    "services: professional": 3,
-    "scientific and technical activities": 3,
+    #"activities auxiliary to financial service and insurance activities": 3,
+    #"architectural and engineering activities; technical testing and analysis": 3,
+    #"computer programming, consultancy and related activities": 3,
+    #"information service activities": 3,
+    #"information and communication": 3,
+    #"other professional, scientific and technical activities": 3,
+    #"other service activities": 3,
+    #"professional, scientific and technical activities": 3,
+    #"programming and broadcasting activities": 3,
+    #"services: professional": 3,
+    #"scientific and technical activities": 3,
 }
 
 # Empty = nationwide. Populate with lowercase province names to narrow.
@@ -76,6 +83,7 @@ CATEGORIES = {
     "services: professional",
     "professional, scientific and technical activities",
     "other professional, scientific and technical activities",
+    "other service activities",
     "scientific and technical activities",
     "activities of head offices; management consultancy activities",
     "architectural and engineering activities; technical testing and analysis",
@@ -97,41 +105,82 @@ BLOCKER_PATTERNS = [
 ]
 
 
-def _get_page(session: requests.Session, params: dict) -> dict:
-    """GET one page, retrying transient failures (timeouts, 5xx, flaky 404s)."""
+def _get_page(session: requests.Session, params: dict, deadline: float) -> dict:
+    """GET one page. Retries transient failures (timeouts, 5xx, and the HTTP 200
+    non-JSON error pages the API serves under load), never past the deadline."""
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            r = session.get(BASE, params=params, timeout=REQUEST_TIMEOUT)
+            r = session.get(BASE, params=params, timeout=min(REQUEST_TIMEOUT, remaining))
             r.raise_for_status()
             return r.json()
         except (requests.RequestException, ValueError) as exc:
             last_exc = exc
             if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-    raise last_exc
+                time.sleep(min(RETRY_BACKOFF_SECONDS * attempt,
+                               max(deadline - time.monotonic(), 0)))
+    raise last_exc or TimeoutError("fetch budget exhausted")
 
 
-def fetch_releases(date_from: str, date_to: str) -> list:
-    """Page through the OCDS endpoint and return every release."""
+def _fetch_window(session: requests.Session, date_from: str, date_to: str,
+                  deadline: float) -> list:
+    """Page through one date window and return its releases."""
     out, page = [], 1
-    session = requests.Session()
-    session.headers.update({"Accept": "application/json"})
-
     while page <= MAX_PAGES:
-        params = {
+        payload = _get_page(session, {
             "PageNumber": page,
             "PageSize": PAGE_SIZE,
             "dateFrom": date_from,
             "dateTo": date_to,
-        }
-        payload = _get_page(session, params)
+        }, deadline)
         releases = payload.get("releases", [])
         if not releases:
             break
         out.extend(releases)
         page += 1
     return out
+
+
+def _day_chunks(date_from: str, date_to: str) -> list:
+    """Date window split into CHUNK_DAYS-sized pieces, newest first."""
+    start = dt.date.fromisoformat(date_from)
+    end = dt.date.fromisoformat(date_to)
+    chunks = []
+    upper = end
+    while upper >= start:
+        lower = max(start, upper - dt.timedelta(days=CHUNK_DAYS - 1))
+        chunks.append((lower.isoformat(), upper.isoformat()))
+        upper = lower - dt.timedelta(days=1)
+    return chunks
+
+
+def fetch_releases(date_from: str, date_to: str) -> tuple:
+    """Fetch the window a chunk at a time, newest first, within a wall-clock
+    budget. Returns (releases, missing) where missing lists the chunks that
+    timed out or errored, so callers can report incomplete coverage."""
+    session = requests.Session()
+    session.headers.update({"Accept": "application/json"})
+    deadline = time.monotonic() + FETCH_BUDGET_SECONDS
+
+    seen, out, missing = set(), [], []
+    for chunk_from, chunk_to in _day_chunks(date_from, date_to):
+        label = chunk_from if chunk_from == chunk_to else f"{chunk_from}..{chunk_to}"
+        if time.monotonic() >= deadline:
+            missing.append((label, "out of time"))
+            continue
+        try:
+            for rel in _fetch_window(session, chunk_from, chunk_to, deadline):
+                ocid = rel.get("ocid")
+                if ocid in seen:
+                    continue
+                seen.add(ocid)
+                out.append(rel)
+        except Exception as exc:
+            missing.append((label, type(exc).__name__))
+    return out, missing
 
 
 def _compile(keyword: str) -> re.Pattern:
@@ -189,16 +238,17 @@ def flatten(rel: dict) -> dict:
     }
 
 
-def build_matches(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
-    """Fetch, score and filter releases. Returns a DataFrame (possibly empty)."""
+def build_matches(lookback_days: int = LOOKBACK_DAYS) -> tuple:
+    """Fetch, score and filter releases. Returns (DataFrame, missing) where
+    missing lists date chunks the API could not serve this run."""
     today = dt.date.today()
     date_from = (today - dt.timedelta(days=lookback_days)).isoformat()
     date_to = today.isoformat()
 
-    releases = fetch_releases(date_from, date_to)
+    releases, missing = fetch_releases(date_from, date_to)
     df = pd.DataFrame(flatten(r) for r in releases)
     if df.empty:
-        return df
+        return df, missing
 
     # Keep only tenders still open.
     df["closing_dt"] = pd.to_datetime(df["closing"], errors="coerce", utc=True)
@@ -217,4 +267,4 @@ def build_matches(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
     # opaque title scores zero yet is exactly what we must not drop.
     df = df.sort_values("score", ascending=False)
     df = df.drop(columns=["closing_dt"])
-    return df
+    return df, missing
