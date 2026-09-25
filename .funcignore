@@ -1,8 +1,13 @@
 .git*
 .vscode
-local.settings.json
-test
 .venv
+.pytest_cache
 __pycache__
+local.settings.json
+local.settings.json.example
+tests
+pytest.ini
+requirements-dev.txt
+TG.py
 *.xlsx
 README.md

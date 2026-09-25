@@ -11,6 +11,8 @@ app = func.FunctionApp()
 # 06:00 and 18:00 UTC = 08:00 and 20:00 SAST (UTC+2), twice daily.
 @app.timer_trigger(schedule="0 0 6,18 * * *", arg_name="timer", run_on_startup=False)
 def etenders_digest(timer: func.TimerRequest) -> None:
+    if timer.past_due:
+        logging.warning("Timer is past due: this run fired later than scheduled.")
     try:
         logging.info("Fetching eTenders releases...")
         df, missing = build_matches()

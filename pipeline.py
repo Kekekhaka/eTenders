@@ -2,13 +2,16 @@
 (TG.py) and the Azure Function (function_app.py)."""
 
 import datetime as dt
+import logging
 import re
 import time
 
 import pandas as pd
 import requests
 
-BASE = "https://ocds-api.etenders.gov.za/api/OCDSReleases"
+logger = logging.getLogger(__name__)
+
+BASE ="https://ocds-api.etenders.gov.za/api/OCDSReleases"
 
 LOOKBACK_DAYS = 5
 # Response time scales with the number of releases returned, and the API's
@@ -116,9 +119,14 @@ def _get_page(session: requests.Session, params: dict, deadline: float) -> dict:
         try:
             r = session.get(BASE, params=params, timeout=min(REQUEST_TIMEOUT, remaining))
             r.raise_for_status()
-            return r.json()
+            payload = r.json()
+            if not isinstance(payload, dict):
+                raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
+            return payload
         except (requests.RequestException, ValueError) as exc:
             last_exc = exc
+            logger.warning("Attempt %d/%d failed for %s: %s",
+                           attempt, MAX_RETRIES, params.get("dateFrom"), exc)
             if attempt < MAX_RETRIES:
                 time.sleep(min(RETRY_BACKOFF_SECONDS * attempt,
                                max(deadline - time.monotonic(), 0)))
@@ -126,7 +134,7 @@ def _get_page(session: requests.Session, params: dict, deadline: float) -> dict:
 
 
 def _fetch_window(session: requests.Session, date_from: str, date_to: str,
-                  deadline: float) -> list:
+                  deadline: float) -> list[dict]:
     """Page through one date window and return its releases."""
     out, page = [], 1
     while page <= MAX_PAGES:
@@ -144,7 +152,7 @@ def _fetch_window(session: requests.Session, date_from: str, date_to: str,
     return out
 
 
-def _day_chunks(date_from: str, date_to: str) -> list:
+def _day_chunks(date_from: str, date_to: str) -> list[tuple[str, str]]:
     """Date window split into CHUNK_DAYS-sized pieces, newest first."""
     start = dt.date.fromisoformat(date_from)
     end = dt.date.fromisoformat(date_to)
@@ -157,30 +165,35 @@ def _day_chunks(date_from: str, date_to: str) -> list:
     return chunks
 
 
-def fetch_releases(date_from: str, date_to: str) -> tuple:
+def fetch_releases(date_from: str, date_to: str) -> tuple[list[dict], list[tuple[str, str]]]:
     """Fetch the window a chunk at a time, newest first, within a wall-clock
-    budget. Returns (releases, missing) where missing lists the chunks that
-    timed out or errored, so callers can report incomplete coverage."""
-    session = requests.Session()
-    session.headers.update({"Accept": "application/json"})
-    deadline = time.monotonic() + FETCH_BUDGET_SECONDS
+    budget. Returns (releases, missing) where missing lists (date, reason) for
+    each chunk the API could not serve, so callers can report the gap.
 
-    seen, out, missing = set(), [], []
-    for chunk_from, chunk_to in _day_chunks(date_from, date_to):
-        label = chunk_from if chunk_from == chunk_to else f"{chunk_from}..{chunk_to}"
-        if time.monotonic() >= deadline:
-            missing.append((label, "out of time"))
-            continue
-        try:
-            for rel in _fetch_window(session, chunk_from, chunk_to, deadline):
-                ocid = rel.get("ocid")
-                if ocid in seen:
-                    continue
-                seen.add(ocid)
-                out.append(rel)
-        except Exception as exc:
-            missing.append((label, type(exc).__name__))
-    return out, missing
+    Only API failures are absorbed here. A bug in our own code still raises,
+    so it fails the run loudly instead of posing as an API outage."""
+    deadline = time.monotonic() + FETCH_BUDGET_SECONDS
+    seen, releases, missing = set(), [], []
+
+    with requests.Session() as session:
+        session.headers.update({"Accept": "application/json"})
+        for chunk_from, chunk_to in _day_chunks(date_from, date_to):
+            label = chunk_from if chunk_from == chunk_to else f"{chunk_from}..{chunk_to}"
+            if time.monotonic() >= deadline:
+                missing.append((label, "out of time"))
+                continue
+            try:
+                chunk = _fetch_window(session, chunk_from, chunk_to, deadline)
+            except (requests.RequestException, ValueError, TimeoutError) as exc:
+                logger.warning("Giving up on %s: %s", label, exc)
+                missing.append((label, type(exc).__name__))
+                continue
+            for rel in chunk:
+                if rel.get("ocid") not in seen:
+                    seen.add(rel.get("ocid"))
+                    releases.append(rel)
+
+    return releases, missing
 
 
 def _compile(keyword: str) -> re.Pattern:
@@ -193,7 +206,7 @@ def _compile(keyword: str) -> re.Pattern:
 _KEYWORD_PATTERNS = [(k, w, _compile(k)) for k, w in KEYWORDS.items()]
 
 
-def score(text: str) -> tuple:
+def score(text: str) -> tuple[int, str]:
     """Return (total score, matched keywords) for a blob of tender text."""
     hits = [(k, w) for k, w, pattern in _KEYWORD_PATTERNS if pattern.search(text)]
     return sum(w for _, w in hits), ", ".join(k for k, _ in sorted(hits, key=lambda h: -h[1]))
@@ -238,33 +251,32 @@ def flatten(rel: dict) -> dict:
     }
 
 
-def build_matches(lookback_days: int = LOOKBACK_DAYS) -> tuple:
-    """Fetch, score and filter releases. Returns (DataFrame, missing) where
-    missing lists date chunks the API could not serve this run."""
-    today = dt.date.today()
-    date_from = (today - dt.timedelta(days=lookback_days)).isoformat()
-    date_to = today.isoformat()
-
-    releases, missing = fetch_releases(date_from, date_to)
+def select_tenders(releases: list[dict]) -> pd.DataFrame:
+    """Turn raw releases into the digest: open tenders in the wanted provinces
+    and categories, best-scoring first."""
     df = pd.DataFrame(flatten(r) for r in releases)
     if df.empty:
-        return df, missing
+        return df
 
-    # Keep only tenders still open.
-    df["closing_dt"] = pd.to_datetime(df["closing"], errors="coerce", utc=True)
-    now = pd.Timestamp.now(tz="UTC")
-    df = df[df["closing_dt"].isna() | (df["closing_dt"] >= now)]
+    closing = pd.to_datetime(df["closing"], errors="coerce", utc=True)
+    df = df[closing.isna() | (closing >= pd.Timestamp.now(tz="UTC"))]
 
-    # Province filter.
     if PROVINCES:
-        prov = df["province"].fillna("").str.lower()
-        df = df[prov.isin(PROVINCES) | (prov == "")]
+        province = df["province"].fillna("").str.lower()
+        df = df[province.isin(PROVINCES) | (province == "")]
 
     if CATEGORIES:
         df = df[df["category"].fillna("").str.lower().isin(CATEGORIES)]
 
     # Score orders the list rather than gating it: an IT-category tender with an
     # opaque title scores zero yet is exactly what we must not drop.
-    df = df.sort_values("score", ascending=False)
-    df = df.drop(columns=["closing_dt"])
-    return df, missing
+    return df.sort_values("score", ascending=False)
+
+
+def build_matches(lookback_days: int = LOOKBACK_DAYS) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+    """Fetch the last `lookback_days` of releases and select the digest.
+    Returns (tenders, missing); see fetch_releases for what missing holds."""
+    today = dt.date.today()
+    date_from = (today - dt.timedelta(days=lookback_days)).isoformat()
+    releases, missing = fetch_releases(date_from, today.isoformat())
+    return select_tenders(releases), missing

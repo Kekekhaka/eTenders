@@ -7,3 +7,4 @@ etenders_matches.xlsx
 .vscode/
 bin/
 obj/
+.pytest_cache/

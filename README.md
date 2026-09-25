@@ -1,17 +1,34 @@
 # eTenders digest — Azure Function
 
-Fetches new eTenders OCDS releases, scores them against `pipeline.KEYWORDS`,
-and emails the matches twice a day (08:00 and 20:00 SAST) using Azure
-Communication Services Email.
+Twice a day (08:00 and 20:00 SAST) this fetches the last few days of tenders
+from the eTenders OCDS API, keeps the open ones in the wanted categories across
+South Africa, ranks them by keyword score, and emails the list via Azure
+Communication Services.
+
+The eTenders API is slow and unreliable, so releases are fetched one day at a
+time, newest first, under a time budget. If some days can't be fetched, the
+email still goes out, marked **Partial digest** and naming the missing dates.
 
 ## Files
 
-- `pipeline.py` — fetch/score/filter logic (shared).
-- `email_sender.py` — builds and sends the report email via Azure Communication Services.
-- `function_app.py` — Azure Functions timer trigger (Python v2 model) that ties the two together.
-- `TG.py` — manual/local CLI runner (writes `etenders_matches.xlsx`, no email).
+- `pipeline.py` — fetching, scoring and filtering.
+- `email_sender.py` — builds and sends the email.
+- `function_app.py` — the Azure Functions timer trigger that ties the two together.
+- `TG.py` — local runner: writes `etenders_matches.xlsx` instead of emailing.
+- `tests/` — offline unit tests; CI runs them before every deploy.
 - `host.json`, `requirements.txt`, `.funcignore` — Azure Functions project files.
+- `requirements-dev.txt`, `pytest.ini` — test tooling (never deployed).
 - `local.settings.json.example` — copy to `local.settings.json` for local runs (never commit the real one).
+
+## Tuning what you get
+
+All in `pipeline.py`:
+
+- `CATEGORIES` — the main volume control. Remove entries to get fewer tenders.
+- `PROVINCES` — empty means nationwide. Use lowercase names as the API spells
+  them (`"gauteng"`, `"western cape"`, …); a test checks the spelling.
+- `KEYWORDS` — only orders the list, it doesn't filter it. Higher weight ranks higher.
+- `LOOKBACK_DAYS` — how many days back each run looks.
 
 ## 1. One-time Azure setup
 
@@ -55,7 +72,7 @@ Set the app settings on the Function App:
 az functionapp config appsettings set -g $RG -n $FUNCAPP --settings `
   "ACS_CONNECTION_STRING=<paste connection string>" `
   "SENDER_EMAIL=<paste verified sender address>" `
-  "RECIPIENT_EMAIL=kekekhaka@gmail.com"
+  "RECIPIENT_EMAIL=you@example.com"
 ```
 
 (Add more comma-separated addresses to `RECIPIENT_EMAIL` if needed.)
@@ -70,11 +87,13 @@ copy local.settings.json.example local.settings.json
 
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+python -m pytest        # offline unit tests, a couple of seconds
 
 func start
 # then in another terminal, trigger it manually:
-# curl -X POST http://localhost:7071/admin/functions/etenders_digest
+# curl.exe -X POST http://localhost:7071/admin/functions/etenders_digest -H "Content-Type: application/json" -d "{}"
 ```
 
 ## 3. Deploy
@@ -89,14 +108,14 @@ Or let GitHub Actions deploy on every push to `main` (see below).
 
 ## 4. Put this in a GitHub repository
 
-1. Go to https://github.com/new, create a repository (e.g. `etenders-digest`), **don't** initialize it with a README/gitignore (you already have them here).
+1. Go to https://github.com/new, create a repository (e.g. `eTenders`), **don't** initialize it with a README/gitignore (you already have them here).
 2. In this folder, run:
    ```powershell
    git init
    git add .
    git commit -m "Azure Function: eTenders digest with email delivery"
    git branch -M main
-   git remote add origin https://github.com/220404773/etenders-digest.git
+   git remote add origin https://github.com/220404773/eTenders.git
    git push -u origin main
    ```
 3. **Enable automatic deploys (optional, via `.github/workflows/deploy.yml` already included):**
@@ -106,9 +125,13 @@ Or let GitHub Actions deploy on every push to `main` (see below).
      ```
    - In GitHub: repo → Settings → Secrets and variables → Actions → New repository secret →
      name it `AZURE_FUNCTIONAPP_PUBLISH_PROFILE`, paste the XML output.
-   - Edit `.github/workflows/deploy.yml` and replace `<your-function-app-name>` with your
-     `$FUNCAPP` value.
-   - Push to `main` and the workflow will deploy automatically.
+   - New Function Apps disable publish-profile auth by default, which makes the deploy
+     fail with `401 Unauthorized`. Enable it once:
+     ```powershell
+     az resource update -g $RG --namespace Microsoft.Web --resource-type basicPublishingCredentialsPolicies `
+       --name scm --parent sites/$FUNCAPP --set properties.allow=true
+     ```
+   - Push to `main`. The workflow runs the tests first and deploys only if they pass.
 
 `local.settings.json` (with your real secrets) is already excluded via `.gitignore` — never commit it.
 
