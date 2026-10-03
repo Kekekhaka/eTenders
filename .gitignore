@@ -8,3 +8,7 @@ etenders_matches.xlsx
 bin/
 obj/
 .pytest_cache/
+etenders_memory.json
+etenders_memory.json.tmp
+etenders_digest.html
+.claude/.cosmos-backup/

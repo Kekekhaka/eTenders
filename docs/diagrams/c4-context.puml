@@ -1,0 +1,20 @@
+@startuml c4-context
+!include <C4/C4_Context>
+title eTenders digest - system context (target)
+
+Person(op, "Operator", "SA data/BI consultant; reads the email and xlsx twice a day")
+System(dig, "eTenders digest", "Azure Function: fetch, filter, flag, email")
+System_Ext(api, "eTenders OCDS API", "National Treasury; public, keyless, unreliable")
+System_Ext(acs, "Azure Communication Services Email", "Digital-CS1, Azure-managed domain")
+System_Ext(hc, "Healthchecks.io (optional)", "Dead-man's switch; on only if HEARTBEAT_URL is set")
+System_Ext(portal, "etenders.gov.za portal", "Manual check for missed days")
+
+Rel(dig, api, "GET releases by day", "HTTPS/JSON")
+Rel(dig, acs, "Send digest / failure notice", "HTTPS")
+Rel(acs, op, "Email: HTML + xlsx")
+Rel(dig, hc, "Ping ok / fail", "HTTPS POST")
+Rel(hc, op, "Alert when no digest", "Email, not via ACS")
+Rel(op, portal, "Checks missed days by hand")
+
+SHOW_LEGEND()
+@enduml

@@ -1,141 +1,74 @@
 # eTenders digest — Azure Function
 
-Twice a day (08:00 and 20:00 SAST) this fetches the last few days of tenders
-from the eTenders OCDS API, keeps the open ones in the wanted categories across
-South Africa, ranks them by keyword score, and emails the list via Azure
-Communication Services.
+Twice a day (08:00 and 20:00 SAST) this Azure Function fetches the last few days of government tenders from the eTenders OCDS API, keeps open ones in the wanted categories nationwide, flags new tenders and those closing within 7 days, and emails a ranked HTML summary plus an xlsx. It costs about US$0.07/month.
 
-The eTenders API is slow and unreliable, so releases are fetched one day at a
-time, newest first, under a time budget. If some days can't be fetched, the
-email still goes out, marked **Partial digest** and naming the missing dates.
+The eTenders API is unreliable, so it is called one day at a time, newest first, under a wall-clock budget. If some days cannot be fetched, the email still goes out, marked **Partial digest** and naming the missing dates.
 
 ## Files
 
-- `pipeline.py` — fetching, scoring and filtering.
-- `email_sender.py` — builds and sends the email.
-- `function_app.py` — the Azure Functions timer trigger that ties the two together.
-- `TG.py` — local runner: writes `etenders_matches.xlsx` instead of emailing.
-- `tests/` — offline unit tests; CI runs them before every deploy.
-- `host.json`, `requirements.txt`, `.funcignore` — Azure Functions project files.
-- `requirements-dev.txt`, `pytest.ini` — test tooling (never deployed).
-- `local.settings.json.example` — copy to `local.settings.json` for local runs (never commit the real one).
+| File | Purpose |
+|------|---------|
+| `function_app.py` | Timer trigger (06:00/18:00 UTC = 08:00/20:00 SAST); orchestrates the run: read memory, fetch, build, send email, save memory, log summary. |
+| `pipeline.py` | Fetch tenders day by day, validate fields, filter by open status and category, score by keyword, order by score. |
+| `memory.py` | Keeps state between runs: which tenders were already sent, which dates were covered. In Azure it is a managed-identity blob; locally a JSON file. |
+| `report.py` | Renders the digest into HTML email body, subject line and xlsx. Pure; does no I/O. |
+| `email_sender.py` | Sends the email via Azure Communication Services (ACS). |
+| `digest.py` | Data contract: types shared between pipeline and report. |
+| `TG.py` | Local runner: writes xlsx and HTML email preview without sending. Safe for testing (uses local file memory). |
+| `tests/` | Offline unit tests; CI runs them before every deploy. |
 
-## Tuning what you get
+## Tuning: edit in `pipeline.py`
 
-All in `pipeline.py`:
+- **CATEGORIES** (line 97): a set of lowercase eTenders category names to keep. This is the main volume control; remove entries to get fewer tenders. An **empty set means no category filter** (everything open is kept).
+- **PROVINCES** (line 92): set of province names (lowercase, e.g. `"gauteng"`, `"western cape"`). Empty set = nationwide.
+- **KEYWORDS** (line 55): dict mapping keywords to weights. Higher weight = ranks higher. These *order* the list; they do not filter.
+- **LOOKBACK_DAYS** (line 29): how many days back to fetch (window is today minus N to today, inclusive).
+- **CLOSING_SOON_DAYS** (line 30): a tender is flagged "CLOSING SOON" if it closes within this many days (default: 7).
 
-- `CATEGORIES` — the main volume control. Remove entries to get fewer tenders.
-- `PROVINCES` — empty means nationwide. Use lowercase names as the API spells
-  them (`"gauteng"`, `"western cape"`, …); a test checks the spelling.
-- `KEYWORDS` — only orders the list, it doesn't filter it. Higher weight ranks higher.
-- `LOOKBACK_DAYS` — how many days back each run looks.
-
-## 1. One-time Azure setup
-
-Prerequisites: [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), an Azure subscription.
+## Run locally
 
 ```powershell
-az login
-
-$RG       = "etenders-rg"
-$LOCATION = "southafricanorth"
-$STORAGE  = "etendersfuncstorage"      # must be globally unique, lowercase
-$FUNCAPP  = "etenders-digest-func"     # must be globally unique
-$ACS_NAME = "etenders-acs"
-
-az group create -n $RG -l $LOCATION
-
-# Storage account required by Functions
-az storage account create -n $STORAGE -g $RG -l $LOCATION --sku Standard_LRS
-
-# Function App (Linux, Consumption plan, Python 3.11)
-az functionapp create -g $RG -n $FUNCAPP -s $STORAGE `
-  --consumption-plan-location $LOCATION `
-  --runtime python --runtime-version 3.11 --functions-version 4 --os-type Linux
-
-# Azure Communication Services resource (for sending email)
-az communication create -n $ACS_NAME -g $RG --data-location "Africa"
-
-# Create an Email Communication Service + a free Azure-managed domain,
-# then connect it to the ACS resource, OR use your own verified domain.
-# Easiest path (Azure Portal): ACS resource -> Email -> Provision domains ->
-# "Add domain" -> "Azure subdomain" -> then link it under ACS resource -> Domains.
-```
-
-After provisioning the email domain in the portal, grab:
-- The **connection string** of the ACS resource (Keys blade).
-- The **verified sender address**, e.g. `DoNotReply@xxxxxxxx.azurecomm.net`.
-
-Set the app settings on the Function App:
-
-```powershell
-az functionapp config appsettings set -g $RG -n $FUNCAPP --settings `
-  "ACS_CONNECTION_STRING=<paste connection string>" `
-  "SENDER_EMAIL=<paste verified sender address>" `
-  "RECIPIENT_EMAIL=you@example.com"
-```
-
-(Add more comma-separated addresses to `RECIPIENT_EMAIL` if needed.)
-
-## 2. Local testing (optional but recommended)
-
-Prerequisites: [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local), Python 3.11.
-
-```powershell
-copy local.settings.json.example local.settings.json
-# edit local.settings.json with your real ACS connection string / addresses
-
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements-dev.txt
-
-python -m pytest        # offline unit tests, a couple of seconds
-
-func start
-# then in another terminal, trigger it manually:
-# curl.exe -X POST http://localhost:7071/admin/functions/etenders_digest -H "Content-Type: application/json" -d "{}"
+python -m pytest -q          # offline tests
+python TG.py                 # builds etenders_matches.xlsx and etenders_digest.html
 ```
 
-## 3. Deploy
+**Python version:** Azure runs Python 3.11. Use 3.11 syntax only. The local venv may be newer (3.12 here); every file parses under the 3.11 grammar, but the tests have not been run on a real 3.11 interpreter.
 
-Manual deploy (fastest first-time option):
+## Deploy to Azure
 
-```powershell
-func azure functionapp publish $FUNCAPP
-```
+1. **Settings** (set these on the Function App via `az functionapp config appsettings set`; never commit them):
+   - `ACS_CONNECTION_STRING` — the Azure Communication Services connection string.
+   - `SENDER_EMAIL` — the verified sender address (e.g. `DoNotReply@xxxxxxxx.azurecomm.net`).
+   - `RECIPIENT_EMAIL` — one or more email addresses (comma-separated).
+   - `HEARTBEAT_URL` (optional) — a Healthchecks.io ping URL for silent-failure detection (off by default).
 
-Or let GitHub Actions deploy on every push to `main` (see below).
+2. **Deploy:** push to `main`. The GitHub Actions workflow runs tests and deploys only if they pass. Watch the Actions run. For rollback, see `docs/cosmos/DEPLOY_PLAN.md`.
 
-## 4. Put this in a GitHub repository
+3. **Pending operator steps:** the Function App needs a managed identity and a storage container for memory. Until these are set up, every email shows "memory unavailable". See `docs/cosmos/DEPLOY_PLAN.md` **section 2** for the exact steps.
 
-1. Go to https://github.com/new, create a repository (e.g. `eTenders`), **don't** initialize it with a README/gitignore (you already have them here).
-2. In this folder, run:
-   ```powershell
-   git init
-   git add .
-   git commit -m "Azure Function: eTenders digest with email delivery"
-   git branch -M main
-   git remote add origin https://github.com/220404773/eTenders.git
-   git push -u origin main
-   ```
-3. **Enable automatic deploys (optional, via `.github/workflows/deploy.yml` already included):**
-   - Download the Function App's publish profile:
-     ```powershell
-     az functionapp deployment list-publishing-profiles -g $RG -n $FUNCAPP --xml
-     ```
-   - In GitHub: repo → Settings → Secrets and variables → Actions → New repository secret →
-     name it `AZURE_FUNCTIONAPP_PUBLISH_PROFILE`, paste the XML output.
-   - New Function Apps disable publish-profile auth by default, which makes the deploy
-     fail with `401 Unauthorized`. Enable it once:
-     ```powershell
-     az resource update -g $RG --namespace Microsoft.Web --resource-type basicPublishingCredentialsPolicies `
-       --name scm --parent sites/$FUNCAPP --set properties.allow=true
-     ```
-   - Push to `main`. The workflow runs the tests first and deploys only if they pass.
+## How to read the email
 
-`local.settings.json` (with your real secrets) is already excluded via `.gitignore` — never commit it.
+- **Banners** at the top: **Partial digest** (some days missed), **Memory unavailable** (state could not be read).
+- **NEW** label: tender was not in last run's state; you did not receive it before.
+- **CLOSING SOON** label: closes within 7 days (configurable).
+- **xlsx:** one `Tenders` sheet. Columns are defined by `TENDER_COLUMNS` in `digest.py` (tender number, title, buyer, province, category, closing and published dates, days left, `is_new`, `closing_soon`, score, matched keywords, blockers, document links, and more).
 
-## Schedule
+## Known limits
 
-The timer trigger cron is `0 0 6,18 * * *` (NCRONTAB, UTC) = **08:00 and 20:00 SAST**
-(South Africa has no DST, so this stays fixed year-round).
+- **Heartbeat monitoring:** optional and off by default (Healthchecks.io free plan; see DEPLOY_PLAN.md section 5).
+- **Freshness:** not measured or logged.
+- **First run:** every tender is marked NEW. Gmail may clip the email (≈102 KB limit); view the full message via "view entire message" link or open the xlsx.
+- **Optional heartbeat:** no cost by default. If enabled, verify the Healthchecks.io free plan includes email alerts before relying on them.
+
+## Decisions and history
+
+- **Architecture decisions** (ADRs): `docs/adr/` — each records context, decision and consequences.
+- **Team decisions:** `docs/cosmos/TEAM_LEADER_DECISIONS.md` — binding rules for all agents.
+- **Sign-off:** `docs/cosmos/SIGN_OFF.md` — what was built, gate results, open risks.
+- **Agent team:** `tools/cosmos_agents.py` installs the ProjectCosmos agents into any project (not deployed).
+- **Full specification:** `docs/cosmos/REQUIREMENTS_PACK.md`, `docs/cosmos/DESIGN_SPEC.md`, `docs/cosmos/API_CONTRACT.md`.
+
+Cost verified as US$0.068/month ≈ R1.09/month (2026-09-30, Microsoft's rate R16.00 per US$).

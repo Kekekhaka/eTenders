@@ -1,19 +1,35 @@
-"""Core eTenders OCDS fetch/score/flatten logic, shared by the CLI script
-(TG.py) and the Azure Function (function_app.py)."""
+"""Core eTenders logic, shared by the local runner (TG.py) and the Azure
+Function (function_app.py): fetch the releases, validate them, select and
+flag the tenders, and build the Digest that report.py renders.
+
+Everything the API sends is untrusted (ADR-0023): it is type-checked here
+before any other code sees it. The rules are in docs/cosmos/API_CONTRACT.md."""
 
 import datetime as dt
 import logging
+import math
 import re
 import time
+from dataclasses import dataclass
 
 import pandas as pd
 import requests
 
+from digest import TENDER_COLUMNS, Digest, MissedDay, PartialDay, is_safe_url, strip_unwritable
+
 logger = logging.getLogger(__name__)
 
-BASE ="https://ocds-api.etenders.gov.za/api/OCDSReleases"
+BASE = "https://ocds-api.etenders.gov.za/api/OCDSReleases"
 
-LOOKBACK_DAYS = 5
+# The days the API's dateFrom/dateTo refer to are assumed to be SAST days.
+# This is the ONLY place that assumption is made (ADR-0017, V-02).
+API_DAY_TZ = dt.timezone(dt.timedelta(hours=2), "SAST")
+
+# --- Tuning: every knob the operator turns is in this file (NFR-09) ---------
+LOOKBACK_DAYS = 5          # the window is today minus 5 days .. today: 6 days
+CLOSING_SOON_DAYS = 7      # "closing soon" means closing within this many days
+MISSED_REPORT_DAYS = 7     # name a permanently missed day for this many days
+
 # Response time scales with the number of releases returned, and the API's
 # throughput swings wildly: ~17 releases/sec when healthy, ~0.75/sec when
 # degraded. At the bad end a whole 5-day window cannot be fetched inside the
@@ -21,7 +37,7 @@ LOOKBACK_DAYS = 5
 # fetched one day at a time, newest first, under a wall-clock budget. Runs
 # happen twice daily, so older days have already been collected by earlier
 # runs and are the right thing to drop when time runs out.
-CHUNK_DAYS = 1
+#
 # PageSize is an upper bound only: a page returns an arbitrary number of
 # releases below it, so the end of the data is an empty page, never a short one.
 PAGE_SIZE = 2000
@@ -32,6 +48,9 @@ FETCH_BUDGET_SECONDS = 420
 REQUEST_TIMEOUT = 150
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 10
+# An ocid is a memory key and a dedupe key; anything longer is not a real one.
+MAX_OCID_CHARS = 200
+MAX_DOCUMENT_URLS = 3
 
 KEYWORDS = {
     # core strengths
@@ -108,9 +127,41 @@ BLOCKER_PATTERNS = [
 ]
 
 
-def _get_page(session: requests.Session, params: dict, deadline: float) -> dict:
-    """GET one page. Retries transient failures (timeouts, 5xx, and the HTTP 200
-    non-JSON error pages the API serves under load), never past the deadline."""
+@dataclass(frozen=True)
+class DayResult:
+    """How the fetch of one publication day went. Backend-internal."""
+
+    day: dt.date
+    ok: bool            # every page fetched, without an error and without hitting MAX_PAGES
+    reason: str | None  # None when ok; else "out of time", "page limit", "http_<code>" or an exception name
+
+
+def window_for(run_at: dt.datetime) -> tuple[dt.date, dt.date]:
+    """The publication days a run asks for, inclusive: LOOKBACK_DAYS before
+    today .. today, where today is run_at's date in API_DAY_TZ."""
+    today = run_at.astimezone(API_DAY_TZ).date()
+    return today - dt.timedelta(days=LOOKBACK_DAYS), today
+
+
+def day_end_utc(day: dt.date) -> dt.datetime:
+    """When `day` ends: 00:00 on the next day in API_DAY_TZ, as a UTC time."""
+    next_midnight = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(0), tzinfo=API_DAY_TZ)
+    return next_midnight.astimezone(dt.timezone.utc)
+
+
+def _reason(exc: Exception) -> str:
+    """A short, secret-free name for an API failure: http_<code> or the class name."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"http_{exc.response.status_code}"
+    return type(exc).__name__
+
+
+def _get_page(session: requests.Session, params: dict, deadline: float) -> list:
+    """GET one page and return its releases ([] at the end of the data).
+
+    Retries transient failures (timeouts, 5xx, the HTTP 200 non-JSON error
+    pages the API serves under load, and a `releases` that is not a list),
+    never past the deadline."""
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         remaining = deadline - time.monotonic()
@@ -122,78 +173,80 @@ def _get_page(session: requests.Session, params: dict, deadline: float) -> dict:
             payload = r.json()
             if not isinstance(payload, dict):
                 raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
-            return payload
-        except (requests.RequestException, ValueError) as exc:
+            releases = payload.get("releases")
+            if releases is None:
+                return []
+            if not isinstance(releases, list):
+                raise ValueError(f"expected releases to be a list, got {type(releases).__name__}")
+            return releases
+        except (requests.RequestException, ValueError, RecursionError) as exc:  # a hostile page can nest too deep
             last_exc = exc
             logger.warning("Attempt %d/%d failed for %s: %s",
-                           attempt, MAX_RETRIES, params.get("dateFrom"), exc)
+                           attempt, MAX_RETRIES, params.get("dateFrom"), _reason(exc))
             if attempt < MAX_RETRIES:
                 time.sleep(min(RETRY_BACKOFF_SECONDS * attempt,
                                max(deadline - time.monotonic(), 0)))
     raise last_exc or TimeoutError("fetch budget exhausted")
 
 
-def _fetch_window(session: requests.Session, date_from: str, date_to: str,
-                  deadline: float) -> list[dict]:
-    """Page through one date window and return its releases."""
-    out, page = [], 1
-    while page <= MAX_PAGES:
-        payload = _get_page(session, {
+def _fetch_day(session: requests.Session, day: str, deadline: float) -> tuple[list, bool]:
+    """Page through one publication day until an empty page.
+    Returns (releases, complete); complete is False when MAX_PAGES cut it short."""
+    out = []
+    for page in range(1, MAX_PAGES + 1):
+        releases = _get_page(session, {
             "PageNumber": page,
             "PageSize": PAGE_SIZE,
-            "dateFrom": date_from,
-            "dateTo": date_to,
+            "dateFrom": day,
+            "dateTo": day,
         }, deadline)
-        releases = payload.get("releases", [])
         if not releases:
-            break
+            return out, True
         out.extend(releases)
-        page += 1
-    return out
+    return out, False
 
 
-def _day_chunks(date_from: str, date_to: str) -> list[tuple[str, str]]:
-    """Date window split into CHUNK_DAYS-sized pieces, newest first."""
-    start = dt.date.fromisoformat(date_from)
-    end = dt.date.fromisoformat(date_to)
-    chunks = []
-    upper = end
-    while upper >= start:
-        lower = max(start, upper - dt.timedelta(days=CHUNK_DAYS - 1))
-        chunks.append((lower.isoformat(), upper.isoformat()))
-        upper = lower - dt.timedelta(days=1)
-    return chunks
+def fetch_releases(date_from: dt.date, date_to: dt.date) -> tuple[list, list[DayResult]]:
+    """Fetch the window one day at a time, newest first, within a wall-clock
+    budget. Returns (releases, day_results), with one DayResult per day,
+    newest first.
 
-
-def fetch_releases(date_from: str, date_to: str) -> tuple[list[dict], list[tuple[str, str]]]:
-    """Fetch the window a chunk at a time, newest first, within a wall-clock
-    budget. Returns (releases, missing) where missing lists (date, reason) for
-    each chunk the API could not serve, so callers can report the gap.
+    Releases are deduplicated by ocid, keeping the newest day's copy. Items
+    that are not a dict with a valid ocid pass through untouched, so that
+    select_tenders drops and counts them (FR-23).
 
     Only API failures are absorbed here. A bug in our own code still raises,
     so it fails the run loudly instead of posing as an API outage."""
     deadline = time.monotonic() + FETCH_BUDGET_SECONDS
-    seen, releases, missing = set(), [], []
+    days_newest_first = [date_to - dt.timedelta(days=i) for i in range((date_to - date_from).days + 1)]
+    seen, releases, results = set(), [], []
 
     with requests.Session() as session:
         session.headers.update({"Accept": "application/json"})
-        for chunk_from, chunk_to in _day_chunks(date_from, date_to):
-            label = chunk_from if chunk_from == chunk_to else f"{chunk_from}..{chunk_to}"
+        for day in days_newest_first:
             if time.monotonic() >= deadline:
-                missing.append((label, "out of time"))
+                results.append(DayResult(day, False, "out of time"))
                 continue
             try:
-                chunk = _fetch_window(session, chunk_from, chunk_to, deadline)
-            except (requests.RequestException, ValueError, TimeoutError) as exc:
-                logger.warning("Giving up on %s: %s", label, exc)
-                missing.append((label, type(exc).__name__))
+                day_releases, complete = _fetch_day(session, day.isoformat(), deadline)
+            except (requests.RequestException, ValueError, TimeoutError, RecursionError) as exc:
+                logger.warning("Giving up on %s: %s", day, _reason(exc))
+                results.append(DayResult(day, False, _reason(exc)))
                 continue
-            for rel in chunk:
-                if rel.get("ocid") not in seen:
-                    seen.add(rel.get("ocid"))
+            if complete:
+                results.append(DayResult(day, True, None))
+            else:
+                logger.warning("%s hit the %d-page limit; it is kept but not complete", day, MAX_PAGES)
+                results.append(DayResult(day, False, "page limit"))
+            for rel in day_releases:
+                ocid = _ocid(rel)
+                if ocid is None:
+                    releases.append(rel)  # invalid: flatten rejects it, select_tenders counts it
+                elif ocid not in seen:
+                    seen.add(ocid)
                     releases.append(rel)
 
-    return releases, missing
+    return releases, results
 
 
 def _compile(keyword: str) -> re.Pattern:
@@ -218,48 +271,134 @@ def blockers(text: str) -> str:
     return "; ".join(found)
 
 
-def flatten(rel: dict) -> dict:
-    t = rel.get("tender") or {}
-    period = t.get("tenderPeriod") or {}
-    docs = t.get("documents") or []
-    contact = t.get("contactPerson") or {}
-    entity = t.get("procuringEntity") or {}
+# --- validating untrusted API data (ADR-0023, API_CONTRACT 4.1) -------------
 
-    blob = " ".join(str(x) for x in [
-        t.get("title", ""), t.get("description", ""), t.get("category", ""),
-        t.get("eligibilityCriteria", ""), t.get("specialConditions", ""),
-        rel.get("description", ""),
-    ])
+def _obj(x) -> dict:
+    """x if it is a dict, else an empty dict, so a wrong type reads as blank."""
+    return x if isinstance(x, dict) else {}
 
-    s, matched = score(blob)
+
+def _text(x) -> str | None:
+    """x as text with the characters xlsx cannot hold removed, or None when x
+    is not a string or is blank."""
+    if not isinstance(x, str):
+        return None
+    x = strip_unwritable(x)
+    return x if x.strip() else None
+
+
+def _ocid(rel) -> str | None:
+    """The release's ocid, or None when the release must be dropped (FR-23)."""
+    if not isinstance(rel, dict):
+        return None
+    ocid = _text(rel.get("ocid"))
+    if ocid is None or len(ocid) > MAX_OCID_CHARS:
+        return None
+    return ocid
+
+
+# A day short of the end of pandas' range, so converting to SAST cannot overflow (QA-D5).
+_LATEST_TIME = pd.Timestamp.max.tz_localize("UTC") - pd.Timedelta(days=1)
+
+
+def _parse_time(text: str | None) -> pd.Timestamp:
+    """An ISO 8601 date or time as a UTC Timestamp, or NaT if it cannot be read.
+    A value with no offset is read in API_DAY_TZ. Each value is parsed on its
+    own: pandas blanks offset values when a column mixes the two kinds."""
+    if text is None:
+        return pd.NaT
+    try:
+        value = dt.datetime.fromisoformat(text.strip())
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=API_DAY_TZ)
+        ts = pd.Timestamp(value).tz_convert("UTC").as_unit("ns")
+        return ts if ts <= _LATEST_TIME else pd.NaT
+    except (ValueError, OverflowError):  # OutOfBoundsDatetime is a ValueError
+        return pd.NaT
+
+
+def _document_urls(docs) -> list[str]:
+    """The first MAX_DOCUMENT_URLS document URLs that are safe to link to."""
+    if not isinstance(docs, list):
+        return []
+    urls = []
+    for doc in docs:
+        url = _text(_obj(doc).get("url"))
+        if url is not None and is_safe_url(url):
+            urls.append(url)
+            if len(urls) == MAX_DOCUMENT_URLS:
+                break
+    return urls
+
+
+def flatten(rel: object) -> dict | None:
+    """One release as a row of plain, validated values, or None when the
+    release must be dropped (not a dict, or no usable ocid). A field of the
+    wrong type becomes blank; it never raises."""
+    ocid = _ocid(rel)
+    if ocid is None:
+        return None
+    t = _obj(rel.get("tender"))
+    period = _obj(t.get("tenderPeriod"))
+    briefing = _obj(t.get("briefingSession")).get("compulsory")
+
+    title = _text(t.get("title"))
+    category = _text(t.get("category"))
+    score_text = " ".join(x for x in [
+        title, _text(t.get("description")), category,
+        _text(t.get("eligibilityCriteria")), _text(t.get("specialConditions")),
+        _text(rel.get("description")),
+    ] if x)
+    s, matched = score(score_text)
+    closing_raw = _text(period.get("endDate"))
+
     return {
-        "score": s,
+        "ocid": ocid,
+        "tender_number": _text(t.get("id")),
+        "title": title[:200] if title else None,
+        "buyer": (_text(_obj(t.get("procuringEntity")).get("name"))
+                  or _text(_obj(rel.get("buyer")).get("name"))),
+        "province": _text(t.get("province")),
+        "category": category,
+        "method": _text(t.get("procurementMethodDetails")),
+        "contact": _text(_obj(t.get("contactPerson")).get("email")),
         "matched_keywords": matched,
-        "blockers": blockers(blob),
-        "tender_number": t.get("id"),
-        "title": (t.get("title") or "")[:200],
-        "buyer": entity.get("name") or (rel.get("buyer") or {}).get("name"),
-        "province": t.get("province"),
-        "category": t.get("category"),
-        "method": t.get("procurementMethodDetails"),
-        "closing": period.get("endDate"),
-        "published": period.get("startDate"),
-        "contact": contact.get("email"),
-        "briefing_compulsory": (t.get("briefingSession") or {}).get("compulsory"),
-        "documents": " | ".join(d.get("url", "") for d in docs[:3]),
-        "ocid": rel.get("ocid"),
+        "blockers": blockers(score_text),
+        "closing": _parse_time(closing_raw),
+        "published": _parse_time(_text(period.get("startDate"))),
+        "closing_raw": closing_raw,
+        "score": s,
+        "briefing_compulsory": briefing if isinstance(briefing, bool) else None,
+        "document_urls": _document_urls(t.get("documents")),
     }
 
 
-def select_tenders(releases: list[dict]) -> pd.DataFrame:
-    """Turn raw releases into the digest: open tenders in the wanted provinces
-    and categories, best-scoring first."""
-    df = pd.DataFrame(flatten(r) for r in releases)
-    if df.empty:
-        return df
+# The columns flatten produces: TENDER_COLUMNS without the flags build_digest adds.
+_FLAT_COLUMNS = [c for c in TENDER_COLUMNS if c not in ("days_left", "closing_soon", "is_new")]
 
-    closing = pd.to_datetime(df["closing"], errors="coerce", utc=True)
-    df = df[closing.isna() | (closing >= pd.Timestamp.now(tz="UTC"))]
+
+def select_tenders(releases: list, run_at: dt.datetime) -> tuple[pd.DataFrame, int]:
+    """Validate the releases and keep the open tenders in the wanted
+    categories (and provinces, when PROVINCES is set). Returns
+    (tenders, dropped), where dropped counts the releases flatten rejected.
+    The rows are not flagged or sorted yet; build_digest does that."""
+    rows, dropped = [], 0
+    for rel in releases:
+        row = flatten(rel)
+        if row is None:
+            dropped += 1
+        else:
+            rows.append(row)
+    if dropped:
+        logger.warning("Dropped %d malformed release(s) from the API", dropped)
+
+    df = pd.DataFrame(rows, columns=_FLAT_COLUMNS)
+    for col in ("closing", "published"):
+        df[col] = pd.to_datetime(df[col], utc=True).astype("datetime64[ns, UTC]")
+    df["score"] = df["score"].astype(int)
+
+    # FR-04: keep a tender that closes at or after run_at, or has no closing date.
+    df = df[df["closing"].isna() | (df["closing"] >= run_at)]
 
     if PROVINCES:
         province = df["province"].fillna("").str.lower()
@@ -270,13 +409,60 @@ def select_tenders(releases: list[dict]) -> pd.DataFrame:
 
     # Score orders the list rather than gating it: an IT-category tender with an
     # opaque title scores zero yet is exactly what we must not drop.
-    return df.sort_values("score", ascending=False)
+    return df.reset_index(drop=True), dropped
 
 
-def build_matches(lookback_days: int = LOOKBACK_DAYS) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
-    """Fetch the last `lookback_days` of releases and select the digest.
-    Returns (tenders, missing); see fetch_releases for what missing holds."""
-    today = dt.date.today()
-    date_from = (today - dt.timedelta(days=lookback_days)).isoformat()
-    releases, missing = fetch_releases(date_from, today.isoformat())
-    return select_tenders(releases), missing
+def _days_left(closing: pd.Series, run_at: dt.datetime) -> pd.Series:
+    """Whole days until closing, rounded up; <NA> when there is no closing date."""
+    days = (closing - pd.Timestamp(run_at)) / pd.Timedelta(days=1)
+    return pd.Series([pd.NA if pd.isna(x) else math.ceil(x) for x in days],
+                     index=closing.index, dtype="Int64")
+
+
+def build_digest(releases: list, day_results: list[DayResult], memory: dict | None,
+                 memory_status: str, heartbeat: str, run_at: dt.datetime,
+                 missed: list[MissedDay] = ()) -> Digest:
+    """Everything one email says, computed once from one clock (run_at).
+    Pure: no I/O. memory_status is memory.load's status; any
+    "unavailable:<reason>" becomes "unavailable" here (the reason goes to
+    RUN_SUMMARY only). `missed` is memory.missed_days(...), passed in so that
+    this module never imports memory.py."""
+    window = window_for(run_at)
+    status = "unavailable" if memory_status.startswith("unavailable") else memory_status
+    df, dropped = select_tenders(releases, run_at)
+
+    if status == "ok":
+        df["is_new"] = ~df["ocid"].isin(list(memory["sent"]))
+    else:
+        df["is_new"] = pd.Series(status == "first_run", index=df.index, dtype=bool)
+    soon_limit = run_at + dt.timedelta(days=CLOSING_SOON_DAYS)
+    df["closing_soon"] = (df["closing"] > run_at) & (df["closing"] <= soon_limit)
+    df["days_left"] = _days_left(df["closing"], run_at)
+
+    # FR-13: NEW first, then score, closing (none last), tender number (none
+    # last), ocid. The ocid is unique, so the order is fully determined.
+    df = df.sort_values(
+        ["is_new", "score", "closing", "tender_number", "ocid"],
+        ascending=[False, False, True, True, True],
+        na_position="last", kind="stable",
+    )
+    df = df[list(TENDER_COLUMNS)].reset_index(drop=True)
+
+    partial = sorted((PartialDay(r.day, r.reason) for r in day_results
+                      if not r.ok and window[0] <= r.day <= window[1]),
+                     key=lambda p: p.day, reverse=True)
+
+    return Digest(
+        run_at=run_at,
+        window=window,
+        tenders=df,
+        total=len(df),
+        new_count=None if status == "unavailable" else int(df["is_new"].sum()),
+        closing_soon_count=int(df["closing_soon"].sum()),
+        closing_soon_days=CLOSING_SOON_DAYS,
+        partial_days=tuple(partial),
+        missed_days=tuple(missed),
+        memory_status=status,
+        heartbeat=heartbeat,
+        dropped_releases=dropped,
+    )

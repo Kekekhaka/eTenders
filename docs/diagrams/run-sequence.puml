@@ -1,0 +1,31 @@
+@startuml run-sequence
+title One scheduled run (target)
+autonumber
+participant "Timer" as T
+participant "function_app.run" as F
+participant "memory (blob)" as M
+participant "pipeline" as P
+participant "report" as R
+participant "ACS" as A
+participant "Healthchecks (optional)" as H
+
+T -> F : invoke; run_at = now UTC, captured once
+F -> M : token from IDENTITY_ENDPOINT, then GET memory.json
+M --> F : 200 + ETag | 404 BlobNotFound = first run | anything else = unavailable
+F -> P : fetch_releases (window from run_at in API_DAY_TZ), at most 420 s
+P --> F : releases, per-day results
+F -> M : missed_days(memory, window) (pure, no I/O)
+F -> P : build_digest(releases, days, memory, status, heartbeat, run_at, missed)
+P --> F : Digest (dropped count from select_tenders)
+F -> R : render_subject, render_html, build_xlsx
+F -> A : begin_send, result(timeout=90)
+alt poller.done() and status == Succeeded (delivered)
+  F -> M : PUT If-Match ETag (skipped when memory was unavailable)
+  F -> H : POST HEARTBEAT_URL (skipped when off)
+else not confirmed, send failed, or crash
+  F -> A : failure notice with redacted text, timeout 30, same done()/Succeeded check
+  F -> H : POST HEARTBEAT_URL/fail (skipped when off)
+  F --> T : raise RuntimeError(redacted) from None
+end
+F -> F : log RUN_SUMMARY (finally)
+@enduml

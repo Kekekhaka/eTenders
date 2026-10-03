@@ -1,0 +1,26 @@
+@startuml c4-container
+!include <C4/C4_Container>
+title eTenders digest - containers (target)
+
+Person(op, "Operator")
+System_Boundary(az, "Azure subscription, etenders-rg") {
+  Container(fn, "Function app etenders-digest-func", "Python 3.11, Linux Consumption, system-assigned identity", "Timer 06:00/18:00 UTC; whole pipeline in one invocation")
+  ContainerDb(blob, "Blob container digest-state", "etendersfuncstorage, private", "memory.json: sent ocids, day coverage")
+  Container(ai, "Application Insights", "Workspace-based, 90 d, sampling off", "Traces incl. one RUN_SUMMARY per run")
+}
+System_Ext(api, "eTenders OCDS API")
+System_Ext(acs, "ACS Email", "RG Tut-digital_student")
+System_Ext(hc, "Healthchecks.io (optional)")
+Container_Ext(local, "TG.py on the operator's laptop", "Python", "Local run; local memory file; no email")
+
+Rel(fn, api, "GET", "HTTPS")
+Rel(fn, blob, "GET / conditional PUT", "HTTPS, bearer token from managed identity")
+Rel(fn, ai, "Logs", "Functions host")
+Rel(fn, acs, "begin_send", "HTTPS, connection string")
+Rel(fn, hc, "Ping", "HTTPS")
+Rel(local, api, "GET", "HTTPS")
+Rel(acs, op, "Email")
+Rel(hc, op, "Alert email")
+
+SHOW_LEGEND()
+@enduml

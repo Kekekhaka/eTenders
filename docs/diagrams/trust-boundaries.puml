@@ -1,0 +1,31 @@
+@startuml trust-boundaries
+!include <C4/C4_Container>
+title Trust boundaries (TB1-TB6)
+
+Boundary(u, "Untrusted") {
+  System_Ext(api, "eTenders API responses")
+}
+Boundary(fnb, "Trusted: function process") {
+  Container(fn, "pipeline / memory / report", "Python")
+}
+Boundary(azb, "Trusted: Azure data plane") {
+  ContainerDb(blob, "digest-state (private)")
+  Container(ai, "App Insights")
+  Container(acs, "ACS")
+}
+Boundary(tp, "Third party (optional)") {
+  System_Ext(hc, "Healthchecks.io")
+}
+Boundary(cl, "Operator's clients") {
+  System_Ext(mail, "Mail client")
+  System_Ext(xl, "Excel")
+}
+
+Rel(api, fn, "TB1: untrusted JSON, validated in flatten")
+Rel(fn, blob, "TB2: MI bearer token; blob validated in load()")
+Rel(fn, ai, "TB3: redacted logs only")
+Rel(fn, acs, "TB4: connection string; escaped HTML")
+Rel(acs, mail, "email")
+Rel(fn, hc, "TB5: fixed allow-listed body")
+Rel(mail, xl, "TB6: xlsx with no formulas; http(s) links only")
+@enduml

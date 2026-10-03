@@ -1,0 +1,16 @@
+@startuml memory-day-states
+title Day entry in memory.json (the "missed" status is derived, never stored)
+state "Absent" as Absent
+state "partial" as Partial
+state "covered" as Covered
+state "Named as missed (derived)" as Named
+
+[*] --> Absent : day enters window
+Absent --> Partial : delivered run fetched it OK before day end
+Absent --> Covered : delivered run fetched it OK after day end
+Partial --> Covered : later delivered run, after day end
+Covered --> [*] : entry dropped at window start - 8 days
+Absent --> Named : day before window start, within 7 days of leaving, or after resolved_through
+Partial --> Named : same (kind: only partly fetched)
+Named --> [*] : more than 7 days out and named once (resolved_through moves up)
+@enduml

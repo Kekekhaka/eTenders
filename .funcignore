@@ -1,4 +1,6 @@
 .git*
+.claude
+docs
 .vscode
 .venv
 .pytest_cache
@@ -11,3 +13,7 @@ requirements-dev.txt
 TG.py
 *.xlsx
 README.md
+etenders_memory.json
+etenders_memory.json.tmp
+etenders_digest.html
+tools

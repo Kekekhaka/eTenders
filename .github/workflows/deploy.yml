@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit SHA to deploy (rollback). Empty = the triggering commit."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-etenders
+  cancel-in-progress: false
 
 env:
   AZURE_FUNCTIONAPP_NAME: etenders-digest-func
@@ -14,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: actions/setup-python@v7
         with:
@@ -30,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: actions/setup-python@v7
         with:

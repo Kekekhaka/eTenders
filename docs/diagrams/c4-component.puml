@@ -1,0 +1,34 @@
+@startuml c4-component
+!include <C4/C4_Component>
+title eTenders digest - components of the function app (target)
+
+Container_Boundary(fn, "Function app / TG.py") {
+  Component(dg, "digest.py", "Lead, new", "Contract: Digest, PartialDay, MissedDay, constants, is_safe_url")
+  Component(fa, "function_app.py", "Backend", "Timer shim + injectable run(); redact(); heartbeat; RUN_SUMMARY")
+  Component(pl, "pipeline.py", "Backend", "Fetch per day; validate releases in flatten; select; flag; order; build Digest")
+  Component(mem, "memory.py", "Backend, new", "load() validates; missed_days() derives; after_delivery(); save(); BlobStore (MI) / FileStore")
+  Component(rp, "report.py", "Frontend, new", "Pure: render_subject, render_html, build_xlsx (no formulas, safe links)")
+  Component(es, "email_sender.py", "Backend", "ACS transport; delivered only when done() and Succeeded")
+  Component(tg, "TG.py", "Backend", "Local runner: FileStore, xlsx + HTML preview, no email")
+}
+ContainerDb_Ext(blob, "digest-state/memory.json")
+System_Ext(api, "eTenders OCDS API")
+System_Ext(acs, "ACS Email")
+System_Ext(hc, "Healthchecks.io (optional)")
+
+Rel(pl, dg, "builds Digest")
+Rel(rp, dg, "reads Digest")
+Rel(fa, mem, "load, missed_days, save")
+Rel(fa, pl, "fetch_releases, build_digest(missed)")
+Rel(fa, es, "send_report(Digest)")
+Rel(es, rp, "render")
+Rel(pl, api, "GET", "HTTPS")
+Rel(mem, blob, "GET / PUT", "Blob REST + bearer")
+Rel(es, acs, "begin_send")
+Rel(fa, hc, "ping", "HTTPS POST")
+Rel(tg, pl, "fetch, build")
+Rel(tg, rp, "build_xlsx, render_html")
+Rel(tg, mem, "FileStore, missed_days")
+
+SHOW_LEGEND()
+@enduml
