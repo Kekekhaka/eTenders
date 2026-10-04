@@ -1,43 +1,42 @@
 # ProjectCosmos: rules every agent follows
 
-Read this file and `project.md` (next to it) before anything else.
-`project.md` holds this project's test command, cost ceiling and no-go rules.
+Read this and `project.md` (next to it) first. `project.md` holds this
+project's test command, cost ceiling and no-go rules.
 
-## Team and artifacts
+You are one member of a small team: do your own job well, hand off cleanly,
+and stop. Agents cannot dispatch agents; the Team Leader (the main session)
+dispatches everyone. Stay in your expertise and your files.
 
-Agents cannot dispatch agents. The Team Leader (the main session) dispatches
-everyone and routes each artifact to the next stage.
+## Artifacts
 
-| Artifact | Path | Owner | Budget |
+| Artifact | Path | Owner | Lines (full / quick) |
 |---|---|---|---|
-| IDEA_BRIEF | `docs/cosmos/IDEA_BRIEF.md` | Ideologist | 150 lines |
-| REQUIREMENTS_PACK | `docs/cosmos/REQUIREMENTS_PACK.md` | Business Analyst | 350 lines |
-| ADRs | `docs/adr/NNNN-title.md` | Business Analyst | 30 lines each |
-| DESIGN_SPEC | `docs/cosmos/DESIGN_SPEC.md` | Architect | 350 lines |
-| WORK_BREAKDOWN, API_CONTRACT | `docs/cosmos/` | Lead Engineer | 150 lines each |
-| IMPLEMENTATION | `docs/cosmos/IMPLEMENTATION.md` | Lead Engineer | 120 lines |
-| REVIEW_REPORT, TEST_REPORT, SECURITY_REPORT | `docs/cosmos/` | Reviewer, QA, Security | 150 lines each |
-| DEPLOY_PLAN | `docs/cosmos/DEPLOY_PLAN.md` | DevOps | 150 lines |
+| IDEA_BRIEF | `docs/cosmos/IDEA_BRIEF.md` | Ideologist | 150 / 60 |
+| REQUIREMENTS_PACK | `docs/cosmos/REQUIREMENTS_PACK.md` | Business Analyst | 350 / 150 |
+| ADRs (hard-to-reverse decisions only) | `docs/adr/NNNN-title.md` | Business Analyst | 30 each |
+| DESIGN_SPEC | `docs/cosmos/DESIGN_SPEC.md` | Architect | 350 / 100 |
+| WORK_BREAKDOWN, API_CONTRACT | `docs/cosmos/` | Lead Engineer | 150 / 60 each |
+| IMPLEMENTATION | `docs/cosmos/IMPLEMENTATION.md` | Lead or the engineer | 120 / 50 |
+| REVIEW_REPORT, TEST_REPORT, SECURITY_REPORT | `docs/cosmos/` | Reviewer, QA, Security | 150 / 60 each |
+| DEPLOY_PLAN | `docs/cosmos/DEPLOY_PLAN.md` | DevOps | 150 / 70 |
 | PROJECT_DOCS | `README.md`, `docs/` | Business Analyst | as needed |
-| SIGN_OFF | `docs/cosmos/SIGN_OFF.md` | Team Leader | 80 lines |
+| SIGN_OFF | `docs/cosmos/SIGN_OFF.md` | Team Leader | 80 / 50 |
 
 ## Spend tokens carefully (the operator pays for every one)
 
-- **Read only what you need.** Your brief names the files. For any document
-  over 300 lines, find the section with Grep, then read just that range. Never
-  read a whole artifact "for context", and don't re-read what you just wrote.
+- **Obey your cap.** Your agent file states a tool-call cap for quick mode
+  (double for full). Stop at the cap and say what is left undone.
+- **Read only what you need.** Your brief names the files. For a document over
+  300 lines, Grep for the section, then read just that range. Never read a
+  whole artifact "for context"; don't re-read what you just wrote.
 - **Cite, don't copy.** Refer to upstream requirements by ID (FR-03, AC-12).
-  Don't restate them. Tables and bullets beat prose.
-- **Stay inside the artifact's line budget** (above). If the work needs more,
-  say so in your reply instead of padding the file.
-- **Quick mode has hard caps:** at most 25 tool calls, read only the files
-  your brief names, an artifact of at most 100 lines, and no second pass.
-  (In this team's own measurements, capped agents used 20-37k tokens; uncapped
-  ones used 80-330k for the same kind of stage.)
-- **Test cheaply.** Run the tests that cover what you changed while you work;
-  run the full suite once at the end.
-- **One pass.** Batch your questions into your reply. Don't make the work
-  depend on a round-trip you could avoid by choosing and stating an assumption.
+  Tables and bullets beat prose.
+- **Stay inside the line budget** (above). If the work needs more, say so in
+  your reply instead of padding the file.
+- **Test cheaply.** Run the tests that cover your change while you work; the
+  full suite once at the end.
+- **One pass.** Put your questions in your reply and state an assumption
+  rather than waiting. Don't reopen decisions in the decision log.
 
 ## How to work
 
@@ -45,8 +44,7 @@ everyone and routes each artifact to the next stage.
   Never report a check as passing unless you ran it and saw it pass.
 - **Keep it simple.** The operator values code a human can read at a glance.
   No new framework, layer or abstraction unless a requirement needs it.
-- **Stay in your role and your files.** Raise scope drift to the Team Leader.
-- **Classify findings** in your role's vocabulary and give each a concrete fix.
+- **Classify findings** in your role's vocabulary, each with a concrete fix.
 
 ## Hard guardrails (override any brief)
 
@@ -58,16 +56,17 @@ everyone and routes each artifact to the next stage.
    it. Use tests, fakes and cached sample data.
 4. **Git:** never commit, push, reset or change config. The operator commits.
 5. **Files:** the folder may be cloud-synced and rewritten mid-session.
-   Re-read a file right before you edit it.
+   Re-read a file right before you edit it, and never write a file in a way
+   that could leave it empty.
 6. **Cost:** add nothing that costs money without the operator's explicit
    approval. Verify every price and free-tier limit at its primary source and
-   state the date. Label anything you could not verify **unverified**. Quote
-   monthly costs in the operator's currency and say which assumption drives
-   them. The Architect owns the cost budget; everyone else works inside it.
+   state the date. Label anything unverified **unverified**. The Architect
+   owns the cost budget; everyone else works inside it.
 
-## Reply format (at most 200 words)
+## Reply format (at most 150 words)
 
 1. **Artifact(s):** paths written or changed.
 2. **Gate:** MET or NOT MET, and why.
 3. **Findings / hand-offs:** most important first.
 4. **Not verified:** what you could not check.
+5. **Tool calls used:** n of your cap.
