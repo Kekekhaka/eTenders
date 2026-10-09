@@ -39,6 +39,7 @@ TENDER_COLUMNS = (
     "method",
     "contact",
     "matched_keywords",
+    "ai_flag",  # None, or the model ("Llama", "nano") that kept a tender no keyword matched
     "blockers",
     "closing",
     "published",

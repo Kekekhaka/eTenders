@@ -37,6 +37,7 @@ _PAPER = "#FFFFFF"       # the message card
 _PAGE = "#F3F4F6"        # behind the card
 _NEW_BG = "#0B5563"      # NEW label: white text, 7.9:1
 _SOON = "#9A3412"        # CLOSING SOON label (white text, 7.3:1) and soon dates on white
+_AI_BG = "#5B21B6"       # AI-flagged label: white text
 _MISSED_BG, _MISSED_FG, _MISSED_EDGE = "#FDECEC", "#7A1414", "#B42318"
 _PARTIAL_BG, _PARTIAL_FG, _PARTIAL_EDGE = "#FFF4D6", "#5C3B00", "#B76E00"
 _INFO_BG, _INFO_EDGE = "#EEF2F6", "#57606A"  # text is _INK
@@ -177,6 +178,8 @@ def _row(r, run_year: int) -> str:
         flags.append(_label("NEW", _NEW_BG))
     if soon:
         flags.append(_label("CLOSING SOON", _SOON))
+    if not pd.isna(r.ai_flag):
+        flags.append(_label(f"AI-flagged ({_e(r.ai_flag)})", _AI_BG))
 
     if pd.isna(r.closing):
         closes = f"<span{_SMALL}>{_e(r.closing_raw) or 'no closing date'}</span>"
@@ -264,6 +267,10 @@ def _footer(d: Digest) -> list[str]:
     if d.dropped_releases > 0:
         lines.append(_e(f"{int(d.dropped_releases)} malformed release(s) from the eTenders API "
                         "were left out."))
+    if d.tenders["ai_flag"].notna().any():
+        lines.append("AI-flagged: no keyword matched, but an AI model judged the tender relevant. "
+                     "Check AI-flagged (nano) ones more carefully: that model was less accurate "
+                     "in testing.")
     if d.total:
         lines.append("The attached xlsx has every tender with all columns, including province, "
                      "contact and published date.")
@@ -323,7 +330,7 @@ def render_html(d: Digest) -> str:
 _XLSX_COLUMNS = (
     ("new", 7), ("closing_soon", 13), ("days_left", 10), ("closing", 17),
     ("tender_number", 18), ("title", 60), ("buyer", 36), ("category", 26),
-    ("province", 16), ("matched_keywords", 28), ("blockers", 34),
+    ("province", 16), ("matched_keywords", 28), ("ai_flag", 10), ("blockers", 34),
     ("briefing_compulsory", 20), ("method", 24), ("contact", 30), ("published", 17),
     ("score", 7), ("document", 50), ("closing_raw", 26), ("ocid", 30),
 )
@@ -354,7 +361,7 @@ def _xlsx_values(r, new_known: bool) -> list:
         None if pd.isna(r.days_left) else int(r.days_left),
         _naive_sast(r.closing),
         _text(r.tender_number), _text(r.title), _text(r.buyer), _text(r.category),
-        _text(r.province), _text(r.matched_keywords), _text(r.blockers),
+        _text(r.province), _text(r.matched_keywords), _text(r.ai_flag), _text(r.blockers),
         briefing,
         _text(r.method), _text(r.contact),
         _naive_sast(r.published),

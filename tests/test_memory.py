@@ -451,7 +451,7 @@ def test_a_first_run_starts_tracking_at_its_window():
     assert saved["tracking_since"] == WINDOW[0]
     assert saved["resolved_through"] == WINDOW[0] - dt.timedelta(days=1)
     assert saved["sent"] == {"a": {"first_sent": RUN_AT, "closing": None}}
-    assert set(saved) == {"schema", "tracking_since", "resolved_through", "sent", "days"}
+    assert set(saved) == {"schema", "tracking_since", "resolved_through", "sent", "days", "ai"}
 
 
 def test_sent_keeps_the_first_time_and_refreshes_the_closing():

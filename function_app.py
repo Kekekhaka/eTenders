@@ -22,6 +22,7 @@ import traceback
 import azure.functions as func
 import requests
 
+import classify
 import email_sender
 import memory
 import pipeline
@@ -35,6 +36,7 @@ HEARTBEAT_PREFIX = "https://hc-ping.com/"
 HEARTBEAT_TIMEOUT_S = 5
 REASON_CHARS = 60        # a day's reason in RUN_SUMMARY is cut to this length
 MISSED_NAMED_CAP = 10    # at most this many missed days are listed in RUN_SUMMARY
+AI_LAST_START_S = 480    # no AI call starts later than this into the run (timeout is 600 s)
 
 app = func.FunctionApp()
 
@@ -55,11 +57,12 @@ _MIN_SECRET_CHARS = 8
 
 def redact(text: str) -> str:
     """text with secrets replaced by REDACTED: the configured HEARTBEAT_URL
-    (and its path), the IDENTITY_HEADER value, bearer tokens, JWTs,
+    (and its path), the IDENTITY_HEADER and CF_API_TOKEN values, bearer tokens, JWTs,
     access_token values, ACS access keys and SAS signature parameters."""
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "").strip()
     heartbeat_id = heartbeat_url.rstrip("/").rsplit("/", 1)[-1]  # the ping UUID at the end
-    secrets = [heartbeat_url, heartbeat_id, os.environ.get("IDENTITY_HEADER", "").strip()]
+    secrets = [heartbeat_url, heartbeat_id, os.environ.get("IDENTITY_HEADER", "").strip(),
+               os.environ.get("CF_API_TOKEN", "").strip()]
     for secret in secrets:
         if len(secret) >= _MIN_SECRET_CHARS:
             text = text.replace(secret, "REDACTED")
@@ -100,9 +103,30 @@ def _day_summary(r: pipeline.DayResult) -> dict:
     return {"day": r.day.isoformat(), "ok": False, "reason": (r.reason or "")[:REASON_CHARS]}
 
 
+def _classify(releases: list, mem: dict | None, run_at: dt.datetime,
+              summary: dict, started: float) -> tuple[dict, dict]:
+    """The AI second look (classify.py). Returns (ai_flags, new verdicts):
+    ai_flags maps each ocid a model judged relevant, remembered or new, to
+    the model's label for the email."""
+    if not classify.enabled():
+        summary["ai"] = "off"
+        return {}, {}
+    remembered = mem.get("ai", {}) if mem else {}
+    candidates = pipeline.ai_candidates(releases, run_at)
+    todo = [t for t in candidates if t["ocid"] not in remembered]
+    # Leave time to send the email inside the 10-minute function timeout.
+    budget = min(classify.BUDGET_S, AI_LAST_START_S - (time.monotonic() - started))
+    new, stats = classify.classify(todo, budget_s=max(budget, 0))
+    summary["ai"] = {"remembered": len(candidates) - len(todo), **stats}
+    verdicts = {**remembered, **new}
+    flags = {ocid: classify.LABELS[v["by"]] for ocid, v in verdicts.items() if v["v"]}
+    return flags, new
+
+
 def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_id: str,
                     summary: dict) -> None:
     """Steps 2 to 6: memory, fetch, digest, send, save. Fills in summary as it goes."""
+    started = time.monotonic()
     mem, status, etag = memory.load(store, run_at)
     summary["memory"]["read"] = status
 
@@ -112,8 +136,10 @@ def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_
     releases, days = pipeline.fetch_releases(*window)
     summary["days"] = [_day_summary(r) for r in days]
 
+    ai_flags, ai_new = _classify(releases, mem, run_at, summary, started)
+
     missed = memory.missed_days(mem, window)
-    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed)
+    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed, ai_flags)
     summary["dropped_releases"] = d.dropped_releases
     summary["counts"] = {"total": d.total, "new": d.new_count, "closing_soon": d.closing_soon_count}
     summary["missed_named"] = [m.day.isoformat() for m in d.missed_days[:MISSED_NAMED_CAP]]
@@ -123,7 +149,7 @@ def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_
 
     # Write the memory only after delivery, and never after a bad read (AC-27, AC-28).
     if status in ("ok", "first_run"):
-        new_memory = memory.after_delivery(mem, d, days, run_at)
+        new_memory = memory.after_delivery(mem, d, days, run_at, ai_new)
         summary["memory"]["write"] = memory.save(store, new_memory, etag)
     else:
         summary["memory"]["write"] = "skipped"
@@ -149,7 +175,7 @@ def run(run_at: dt.datetime, store, send_report, send_failure_notice, ping,
         "v": 1, "run_id": run_id,
         "started_at": run_at.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": None, "past_due": past_due, "window": None, "days": None,
-        "dropped_releases": None, "counts": None, "missed_named": None,
+        "dropped_releases": None, "counts": None, "missed_named": None, "ai": None,
         "memory": {"read": None, "write": None}, "email": None,
         "outcome": None, "error": None, "heartbeat": None,
     }

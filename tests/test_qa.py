@@ -946,7 +946,8 @@ def test_ac21b_only_safe_links_become_links_in_both_outputs(url, linked):
     d = pipeline.build_digest([rel], [], None, "first_run", "off", run)
     body = report.render_html(d)
     wb = openpyxl.load_workbook(io.BytesIO(report.build_xlsx(d)))
-    cell = wb["Tenders"].cell(2, 17)
+    headers = [c.value for c in wb["Tenders"][1]]
+    cell = wb["Tenders"].cell(2, headers.index("document") + 1)
     assert ("<a href=\"" + url.replace("&", "&amp;") in body) is linked or not linked
     assert (cell.hyperlink is not None) is linked
     if not linked:

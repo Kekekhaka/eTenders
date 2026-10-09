@@ -26,9 +26,9 @@ BASE = "https://ocds-api.etenders.gov.za/api/OCDSReleases"
 API_DAY_TZ = dt.timezone(dt.timedelta(hours=2), "SAST")
 
 # --- Tuning: every knob the operator turns is in this file (NFR-09) ---------
-LOOKBACK_DAYS = 5          # the window is today minus 5 days .. today: 6 days
-CLOSING_SOON_DAYS = 7      # "closing soon" means closing within this many days
-MISSED_REPORT_DAYS = 7     # name a permanently missed day for this many days
+LOOKBACK_DAYS = 4          # the window is today minus 4 days .. today: 5 days
+CLOSING_SOON_DAYS = 5      # "closing soon" means closing within this many days
+MISSED_REPORT_DAYS = 5     # name a permanently missed day for this many days
 
 # Response time scales with the number of releases returned, and the API's
 # throughput swings wildly: ~17 releases/sec when healthy, ~0.75/sec when
@@ -367,15 +367,41 @@ def flatten(rel: object) -> dict | None:
     }
 
 
-# The columns flatten produces: TENDER_COLUMNS without the flags build_digest adds.
-_FLAT_COLUMNS = [c for c in TENDER_COLUMNS if c not in ("days_left", "closing_soon", "is_new")]
+# The columns flatten produces: TENDER_COLUMNS without the flags added later.
+_FLAT_COLUMNS = [c for c in TENDER_COLUMNS
+                 if c not in ("days_left", "closing_soon", "is_new", "ai_flag")]
+
+AI_DESCRIPTION_CHARS = 600
 
 
-def select_tenders(releases: list, run_at: dt.datetime) -> tuple[pd.DataFrame, int]:
+def ai_candidates(releases: list, run_at: dt.datetime) -> list[dict]:
+    """The open tenders the rules below would leave out, for classify.py:
+    dicts of ocid, title, buyer, category and description, one per ocid."""
+    out, seen = [], set()
+    for rel in releases:
+        row = flatten(rel)
+        if row is None or row["ocid"] in seen:
+            continue
+        seen.add(row["ocid"])
+        if row["score"] > 0 or _has_kept_category(rel):
+            continue  # already in the digest
+        if not pd.isna(row["closing"]) and row["closing"] < run_at:
+            continue  # closed
+        description = _text(_obj(rel.get("tender")).get("description")) or ""
+        out.append({"ocid": row["ocid"], "title": row["title"], "buyer": row["buyer"],
+                    "category": row["category"],
+                    "description": description[:AI_DESCRIPTION_CHARS]})
+    return out
+
+
+def select_tenders(releases: list, run_at: dt.datetime,
+                   ai_flags: dict | None = None) -> tuple[pd.DataFrame, int]:
     """Validate the releases and keep the open tenders in the wanted
-    consulting categories or keyword hits (and provinces, when PROVINCES is set). Returns
+    consulting categories or keyword hits (and provinces, when PROVINCES is set),
+    plus those in ai_flags (ocid -> the model's label, e.g. "Llama"). Returns
     (tenders, dropped), where dropped counts the releases flatten rejected.
     The rows are not flagged or sorted yet; build_digest does that."""
+    ai_flags = ai_flags or {}
     rows, keep, dropped = [], [], 0
     for rel in releases:
         row = flatten(rel)
@@ -400,9 +426,12 @@ def select_tenders(releases: list, run_at: dt.datetime) -> tuple[pd.DataFrame, i
         province = df["province"].fillna("").str.lower()
         df = df[province.isin(PROVINCES) | (province == "")]
 
-    # Keep a consulting-category tender, or any tender with a keyword hit.
-    # Score then orders the list.
-    df = df[df["_keep"] | (df["score"] > 0)].drop(columns="_keep")
+    # Keep a consulting-category tender, any tender with a keyword hit, or
+    # one an AI model judged relevant. Score then orders the list.
+    df["ai_flag"] = pd.Series([ai_flags.get(o) for o in df["ocid"]], index=df.index, dtype=object)
+    keyword_kept = df["_keep"] | (df["score"] > 0)
+    df.loc[keyword_kept, "ai_flag"] = None  # the label only marks tenders the keywords missed
+    df = df[keyword_kept | df["ai_flag"].notna()].drop(columns="_keep")
     return df.reset_index(drop=True), dropped
 
 
@@ -415,15 +444,15 @@ def _days_left(closing: pd.Series, run_at: dt.datetime) -> pd.Series:
 
 def build_digest(releases: list, day_results: list[DayResult], memory: dict | None,
                  memory_status: str, heartbeat: str, run_at: dt.datetime,
-                 missed: list[MissedDay] = ()) -> Digest:
+                 missed: list[MissedDay] = (), ai_flags: dict | None = None) -> Digest:
     """Everything one email says, computed once from one clock (run_at).
     Pure: no I/O. memory_status is memory.load's status; any
     "unavailable:<reason>" becomes "unavailable" here (the reason goes to
     RUN_SUMMARY only). `missed` is memory.missed_days(...), passed in so that
-    this module never imports memory.py."""
+    this module never imports memory.py. ai_flags: see select_tenders."""
     window = window_for(run_at)
     status = "unavailable" if memory_status.startswith("unavailable") else memory_status
-    df, dropped = select_tenders(releases, run_at)
+    df, dropped = select_tenders(releases, run_at, ai_flags)
 
     if status == "ok":
         df["is_new"] = ~df["ocid"].isin(list(memory["sent"]))

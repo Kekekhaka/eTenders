@@ -39,6 +39,7 @@ WARN_BYTES = 2 * 1024 * 1024
 BLOB_API_VERSION = "2021-08-06"
 SCHEMA = 1
 
+STORAGE_RESOURCE = "https://storage.azure.com/"
 TOKEN_TIMEOUT_S = 5
 BLOB_TIMEOUT_S = 10
 SAVE_RETRY_DELAY_S = 5
@@ -47,6 +48,9 @@ SAVE_RETRY_DELAY_S = 5
 # closes, whichever is later.
 SENT_KEEP_DAYS = 90
 SENT_KEEP_AFTER_CLOSING_DAYS = 30
+# AI verdicts (classify.py) are kept this long; by then the tender has left the window.
+AI_KEEP_DAYS = 14
+AI_MODELS = ("llama", "nano")
 # Clamps for absurd stored dates (AC-39).
 CLOSING_CLAMP_DAYS = 365
 # How far back a gap in the runs is still classified, day by day. It bounds
@@ -60,11 +64,11 @@ ONE_DAY = dt.timedelta(days=1)
 
 # --- token and stores --------------------------------------------------------
 
-def mi_token() -> tuple[str | None, str]:
-    """A storage token from the managed identity: (token, "ok"), or
-    (None, "no_identity") when the identity isn't configured, or
-    (None, "token") on any failure. Never raises; never logs the token, the
-    identity header or the response body."""
+def mi_token(resource: str = STORAGE_RESOURCE) -> tuple[str | None, str]:
+    """A token for `resource` (Blob storage by default) from the managed
+    identity: (token, "ok"), or (None, "no_identity") when the identity isn't
+    configured, or (None, "token") on any failure. Never raises; never logs
+    the token, the identity header or the response body."""
     endpoint = os.environ.get("IDENTITY_ENDPOINT", "").strip()
     header = os.environ.get("IDENTITY_HEADER", "").strip()
     if not endpoint or not header:
@@ -72,7 +76,7 @@ def mi_token() -> tuple[str | None, str]:
     try:
         r = requests.get(
             endpoint,
-            params={"resource": "https://storage.azure.com/", "api-version": "2019-08-01"},
+            params={"resource": resource, "api-version": "2019-08-01"},
             headers={"X-IDENTITY-HEADER": header},
             timeout=TOKEN_TIMEOUT_S,
         )
@@ -240,7 +244,17 @@ def _days(x) -> dict:
     return days
 
 
-# Each top-level key the code uses, and how to read it. Other keys are ignored.
+def _ai(x) -> dict:
+    ai = {}
+    for ocid, entry in _dict(x).items():
+        entry = _dict(entry)
+        if not isinstance(entry["v"], bool) or entry["by"] not in AI_MODELS:
+            raise ValueError("unexpected AI verdict")
+        ai[ocid] = {"v": entry["v"], "by": entry["by"], "on": _date(entry["on"])}
+    return ai
+
+
+# Each required top-level key, and how to read it. Other keys are ignored.
 _CONVERTERS = (
     ("tracking_since", _date),
     ("resolved_through", _date),
@@ -275,6 +289,13 @@ def load(store, run_at: dt.datetime) -> tuple[dict | None, str, str | None]:
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
             return _unavailable(f"invalid:{key}")
 
+    # Optional and added later: a bad "ai" section only costs a re-classification.
+    try:
+        memory["ai"] = _ai(raw.get("ai", {}))
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
+        logger.warning("Run memory: the AI verdicts are invalid and were dropped")
+        memory["ai"] = {}
+
     _clamp(memory, run_at)
     return memory, "ok", etag
 
@@ -292,6 +313,8 @@ def _clamp(memory: dict, run_at: dt.datetime) -> None:
         entry["first_sent"] = min(entry["first_sent"], run_at)
         if entry["closing"] is not None:
             entry["closing"] = min(entry["closing"], latest_closing)
+    for entry in memory.get("ai", {}).values():  # a future date would never expire
+        entry["on"] = min(entry["on"], run_date)
     earliest = run_date - dt.timedelta(days=MAX_GAP_DAYS)
     memory["resolved_through"] = min(max(memory["resolved_through"], earliest), run_date)
     # Tracking cannot start after the first day not yet resolved (QA-D2).
@@ -336,13 +359,21 @@ def _sent_expiry(entry: dict) -> dt.datetime:
     return keep_until
 
 
-def after_delivery(memory: dict | None, digest, day_results: list, run_at: dt.datetime) -> dict:
+def after_delivery(memory: dict | None, digest, day_results: list, run_at: dt.datetime,
+                   ai_verdicts: dict | None = None) -> dict:
     """The memory to save once `digest` is delivered. memory None means a
-    first run. Pure: the input memory is not changed."""
+    first run. ai_verdicts are this run's new classify() verdicts. Pure: the
+    input memory is not changed."""
     window = digest.window
     if memory is None:
         memory = {"tracking_since": window[0], "resolved_through": window[0] - ONE_DAY,
                   "sent": {}, "days": {}}
+
+    run_date = _run_date(run_at)
+    ai = dict(memory.get("ai", {}))
+    for ocid, v in (ai_verdicts or {}).items():
+        ai[ocid] = {"v": v["v"], "by": v["by"], "on": run_date}
+    ai = {ocid: e for ocid, e in ai.items() if e["on"] >= run_date - dt.timedelta(days=AI_KEEP_DAYS)}
 
     # Every ocid in the delivered digest is now sent. Keep the first time it
     # was sent, and the latest known closing time.
@@ -377,6 +408,7 @@ def after_delivery(memory: dict | None, digest, day_results: list, run_at: dt.da
         "resolved_through": max(memory["resolved_through"], window[0] - ONE_DAY),
         "sent": sent,
         "days": days,
+        "ai": ai,
     }
 
 
@@ -397,6 +429,8 @@ def _dumps(memory: dict) -> str:
                         "closing": None if e["closing"] is None else _iso_time(e["closing"])}
                  for ocid, e in memory["sent"].items()},
         "days": {day.isoformat(): state for day, state in memory["days"].items()},
+        "ai": {ocid: {"v": e["v"], "by": e["by"], "on": e["on"].isoformat()}
+               for ocid, e in memory.get("ai", {}).items()},
     }
     return json.dumps(doc, separators=(",", ":"), sort_keys=True)
 
