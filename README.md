@@ -115,7 +115,7 @@ Prices are from the Azure Retail Prices API (ZAR, South Africa North) and Cloudf
 
 - **The eTenders API** fails for many weekdays. Those days show as partial, and then as missed if they never recover.
 - **AI accuracy** comes from a small sample with only 4 relevant tenders. Watch the AI-flagged tenders for the first weeks.
-- **Cloudflare's rate limit** for this model is unverified. If `RUN_SUMMARY` shows `cf_off: http_429` with neurons left, lower `WORKERS` in `classify.py`.
+- **Cloudflare's rate limit** is 300 requests a minute for text models on the free plan (Workers AI limits page, 2026-10-09). With `WORKERS = 4` that holds if a call takes 0.8 s or more; the real call time from Azure is not measured yet. If `RUN_SUMMARY` shows `cf_off: "http_429"` while the dashboard shows neurons left, lower `WORKERS` in `classify.py` to 2. To check, run this in Application Insights → Logs: `traces | where message startswith "RUN_SUMMARY" | top 1 by timestamp`.
 - **First run after a memory reset:** every tender is marked NEW. Gmail may clip a large email (about 102 KB); open the xlsx.
 - **Heartbeat monitoring** is off by default.
 
