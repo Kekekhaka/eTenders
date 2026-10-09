@@ -13,7 +13,7 @@ from pipeline import DayResult
 
 
 def release(ocid):
-    return {"ocid": ocid, "tender": {"id": ocid, "title": "power bi", "category": "Services: Professional",
+    return {"ocid": ocid, "tender": {"id": ocid, "title": "power bi", "additionalProcurementCategories": ["consultingServices"],
                                      "tenderPeriod": {"endDate": "2099-01-01T00:00:00Z"}}}
 
 

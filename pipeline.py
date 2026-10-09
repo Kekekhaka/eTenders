@@ -91,26 +91,10 @@ KEYWORDS = {
 # Empty = nationwide. Populate with lowercase province names to narrow.
 PROVINCES = set()
 
-# The main volume control. Tender titles are opaque reference codes and the
-# descriptions are thin, so category is the only metadata that discriminates;
-# keyword scoring on metadata alone finds almost nothing.
-CATEGORIES = {
-    # unambiguously IT / data
-    "information and communication",
-    "information service activities",
-    "computer programming, consultancy and related activities",
-    "programming and broadcasting activities",
-    "supplies: computer equipment",
-    # professional / technical consulting, where data work tends to be advertised
-    "services: professional",
-    "professional, scientific and technical activities",
-    "other professional, scientific and technical activities",
-    "other service activities",
-    "scientific and technical activities",
-    "activities of head offices; management consultancy activities",
-    "architectural and engineering activities; technical testing and analysis",
-    "scientific research and development",
-}
+# The main volume control. Titles are opaque codes, so a tender is kept when
+# it is open AND (an additionalProcurementCategories entry is in this set,
+# matched case-insensitively, OR its keyword score is above 0).
+KEEP_ADDITIONAL_CATEGORIES = {"consultingservices"}
 
 # Phrases that usually mean an accreditation or track record gate.
 BLOCKER_PATTERNS = [
@@ -331,6 +315,16 @@ def _document_urls(docs) -> list[str]:
     return urls
 
 
+def _has_kept_category(rel: object) -> bool:
+    """True when additionalProcurementCategories is a list holding a wanted
+    category. Any other shape (string, None, numbers) means no match."""
+    cats = _obj(_obj(rel).get("tender")).get("additionalProcurementCategories")
+    if not isinstance(cats, list):
+        return False
+    return any(isinstance(c, str) and c.strip().lower() in KEEP_ADDITIONAL_CATEGORIES
+               for c in cats)
+
+
 def flatten(rel: object) -> dict | None:
     """One release as a row of plain, validated values, or None when the
     release must be dropped (not a dict, or no usable ocid). A field of the
@@ -343,9 +337,9 @@ def flatten(rel: object) -> dict | None:
     briefing = _obj(t.get("briefingSession")).get("compulsory")
 
     title = _text(t.get("title"))
-    category = _text(t.get("category"))
+    category = _text(t.get("mainProcurementCategory"))
     score_text = " ".join(x for x in [
-        title, _text(t.get("description")), category,
+        title, _text(t.get("description")),
         _text(t.get("eligibilityCriteria")), _text(t.get("specialConditions")),
         _text(rel.get("description")),
     ] if x)
@@ -358,7 +352,7 @@ def flatten(rel: object) -> dict | None:
         "title": title[:200] if title else None,
         "buyer": (_text(_obj(t.get("procuringEntity")).get("name"))
                   or _text(_obj(rel.get("buyer")).get("name"))),
-        "province": _text(t.get("province")),
+        "province": None,  # the API no longer supplies a province
         "category": category,
         "method": _text(t.get("procurementMethodDetails")),
         "contact": _text(_obj(t.get("contactPerson")).get("email")),
@@ -379,20 +373,22 @@ _FLAT_COLUMNS = [c for c in TENDER_COLUMNS if c not in ("days_left", "closing_so
 
 def select_tenders(releases: list, run_at: dt.datetime) -> tuple[pd.DataFrame, int]:
     """Validate the releases and keep the open tenders in the wanted
-    categories (and provinces, when PROVINCES is set). Returns
+    consulting categories or keyword hits (and provinces, when PROVINCES is set). Returns
     (tenders, dropped), where dropped counts the releases flatten rejected.
     The rows are not flagged or sorted yet; build_digest does that."""
-    rows, dropped = [], 0
+    rows, keep, dropped = [], [], 0
     for rel in releases:
         row = flatten(rel)
         if row is None:
             dropped += 1
         else:
             rows.append(row)
+            keep.append(_has_kept_category(rel))
     if dropped:
         logger.warning("Dropped %d malformed release(s) from the API", dropped)
 
     df = pd.DataFrame(rows, columns=_FLAT_COLUMNS)
+    df["_keep"] = pd.Series(keep, index=df.index, dtype=bool)
     for col in ("closing", "published"):
         df[col] = pd.to_datetime(df[col], utc=True).astype("datetime64[ns, UTC]")
     df["score"] = df["score"].astype(int)
@@ -404,11 +400,9 @@ def select_tenders(releases: list, run_at: dt.datetime) -> tuple[pd.DataFrame, i
         province = df["province"].fillna("").str.lower()
         df = df[province.isin(PROVINCES) | (province == "")]
 
-    if CATEGORIES:
-        df = df[df["category"].fillna("").str.lower().isin(CATEGORIES)]
-
-    # Score orders the list rather than gating it: an IT-category tender with an
-    # opaque title scores zero yet is exactly what we must not drop.
+    # Keep a consulting-category tender, or any tender with a keyword hit.
+    # Score then orders the list.
+    df = df[df["_keep"] | (df["score"] > 0)].drop(columns="_keep")
     return df.reset_index(drop=True), dropped
 
 

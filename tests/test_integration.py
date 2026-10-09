@@ -34,7 +34,7 @@ BLOB_URL = "https://example.blob.core.windows.net/digest-state/memory.json"
 def release(ocid, title="Data warehouse support", closing="2026-10-20T11:00:00+02:00",
             category="Services: Professional"):
     return {"ocid": ocid, "tender": {
-        "id": f"T-{ocid}", "title": title, "category": category, "province": "Gauteng",
+        "id": f"T-{ocid}", "title": title, "mainProcurementCategory": category, "additionalProcurementCategories": ["consultingServices"],
         "tenderPeriod": {"endDate": closing, "startDate": "2026-09-28T09:00:00+02:00"},
         "documents": [{"url": f"https://www.etenders.gov.za/{ocid}.pdf"}],
     }}

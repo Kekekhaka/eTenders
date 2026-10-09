@@ -39,7 +39,7 @@ def main(memory_file: str = MEMORY_FILE, xlsx_file: str = XLSX_FILE,
 
     xlsx = report.build_xlsx(d)
     if xlsx is None:
-        print("No matching tenders. Widen LOOKBACK_DAYS or CATEGORIES in pipeline.py.")
+        print("No matching tenders. Widen LOOKBACK_DAYS or KEEP_ADDITIONAL_CATEGORIES in pipeline.py.")
     else:
         with open(xlsx_file, "wb") as f:
             f.write(xlsx)

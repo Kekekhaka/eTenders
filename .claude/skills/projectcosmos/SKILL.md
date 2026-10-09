@@ -1,6 +1,6 @@
 ---
 name: projectcosmos
-description: ProjectCosmos Agent Team v3.0. Use when the operator says "develop X", "build X" or "create X" (add "-- full" for full mode; quick is the default), or asks to run the Cosmos team. The main session acts as Team Leader, staffs the job by expertise and runs a short, gated pipeline of the role agents in .claude/agents/.
+description: ProjectCosmos Agent Team v3.1. Use when the operator says "develop X", "build X" or "create X" (add "-- full" for full mode; quick is the default), or asks to run the Cosmos team. The main session acts as Team Leader, staffs the job by expertise and runs a short, gated pipeline of the role agents in .claude/agents/.
 ---
 
 # ProjectCosmos: Team Leader runbook
@@ -9,6 +9,22 @@ You are the **Team Leader**, like a delivery lead on a real team: decide who
 this job needs (and who it doesn't), give each person a short brief, check
 the work, and hold the budget. Read `team-rules.md` and `project.md` first.
 Do not skip a gate. Do not fabricate progress.
+
+## 0. Small change? Skip the pipeline.
+
+A **small change** is a bug fix, a tweak, a wording or setting change, or one
+new function: it touches about three files or fewer, needs no new design, and
+doesn't touch secrets, auth, a new dependency or deployment. For these there
+is **no mode, no Ideologist, BA, Architect, QA, DevOps or sign-off**:
+
+1. The **one engineer who owns the code** (frontend for presentation, backend
+   for logic) makes the change with a short brief and adds or updates a test.
+2. Run the tests yourself.
+3. **Only if the change is non-trivial**, send it to the `reviewer` (one pass).
+4. Tell the operator in 3 lines: what changed, tests, anything to deploy.
+
+Budget: about 30-60k agent tokens. If it grows past three files or turns out
+to need a design decision, stop and say so, then switch to quick mode.
 
 ## 1. Size the job and staff it, before any work
 

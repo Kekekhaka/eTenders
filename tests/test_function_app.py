@@ -26,7 +26,7 @@ ALL_OK = [DayResult(day, True, None) for day in WINDOW_DAYS]
 
 def release(ocid, closing="2026-10-20T09:00:00Z"):
     return {"ocid": ocid, "tender": {"id": ocid, "title": "data warehouse",
-                                     "category": "Services: Professional",
+                                     "additionalProcurementCategories": ["consultingServices"],
                                      "tenderPeriod": {"endDate": closing}}}
 
 

@@ -479,7 +479,7 @@ def test_sent_ocids_are_kept_90_days_or_until_closing_plus_30_whichever_is_later
 
 def test_a_tender_is_new_only_once():
     # AC-05: B is NEW at 06:00, that digest is delivered, and B is not NEW at 18:00.
-    rel = {"ocid": "B", "tender": {"id": "B", "category": "Services: Professional",
+    rel = {"ocid": "B", "tender": {"id": "B", "additionalProcurementCategories": ["consultingServices"],
                                    "tenderPeriod": {"endDate": "2026-10-20T09:00:00Z"}}}
     morning = at(D(2026, 9, 30), 6)
     d1 = pipeline.build_digest([rel], [], None, "first_run", "off", morning)

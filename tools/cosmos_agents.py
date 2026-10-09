@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "3.0"
+VERSION = "3.1"
 DIAGRAMS = "PlantUML (C4-PlantUML), sources in docs/diagrams/"  # never Mermaid
 
 # Model profiles. "standard" is each agent's own model (below). "economy" moves
@@ -177,6 +177,22 @@ You are the **Team Leader**, like a delivery lead on a real team: decide who
 this job needs (and who it doesn't), give each person a short brief, check
 the work, and hold the budget. Read `team-rules.md` and `project.md` first.
 Do not skip a gate. Do not fabricate progress.
+
+## 0. Small change? Skip the pipeline.
+
+A **small change** is a bug fix, a tweak, a wording or setting change, or one
+new function: it touches about three files or fewer, needs no new design, and
+doesn't touch secrets, auth, a new dependency or deployment. For these there
+is **no mode, no Ideologist, BA, Architect, QA, DevOps or sign-off**:
+
+1. The **one engineer who owns the code** (frontend for presentation, backend
+   for logic) makes the change with a short brief and adds or updates a test.
+2. Run the tests yourself.
+3. **Only if the change is non-trivial**, send it to the `reviewer` (one pass).
+4. Tell the operator in 3 lines: what changed, tests, anything to deploy.
+
+Budget: about 30-60k agent tokens. If it grows past three files or turns out
+to need a design decision, stop and say so, then switch to quick mode.
 
 ## 1. Size the job and staff it, before any work
 

@@ -27,7 +27,7 @@ def release(ocid, title="", category="Services: Professional", province="Gauteng
     closing may be a datetime, a raw string, or None for no closing date."""
     if isinstance(closing, dt.datetime):
         closing = closing.isoformat()
-    t = {"id": number or ocid, "title": title, "category": category, "province": province,
+    t = {"id": number or ocid, "title": title, "mainProcurementCategory": category, "additionalProcurementCategories": ["consultingServices"],
          "tenderPeriod": {"endDate": closing} if closing is not None else {}}
     t.update(tender)
     return {"ocid": ocid, "tender": t}
@@ -124,10 +124,10 @@ def test_tuning_constants_exist_and_have_a_sensible_shape():
     # Shape only: the operator edits the values (AC-24), so none is pinned here.
     for name in ("LOOKBACK_DAYS", "CLOSING_SOON_DAYS", "MISSED_REPORT_DAYS"):
         assert isinstance(getattr(pipeline, name), int) and getattr(pipeline, name) > 0
-    for name in ("CATEGORIES", "PROVINCES"):
+    for name in ("KEEP_ADDITIONAL_CATEGORIES", "PROVINCES"):
         values = getattr(pipeline, name)
         assert all(v == v.lower() and v.strip() == v for v in values)
-    assert pipeline.CATEGORIES and pipeline.KEYWORDS
+    assert pipeline.KEEP_ADDITIONAL_CATEGORIES and pipeline.KEYWORDS
     assert all(w > 0 for w in pipeline.KEYWORDS.values())
     assert len(pipeline.KEYWORDS) == len({k.lower() for k in pipeline.KEYWORDS})
 
@@ -362,11 +362,56 @@ def test_select_tenders_keeps_open_wanted_tenders(monkeypatch):
         release("weak", title="general consulting"),
         release("strong", title="data warehouse and power bi"),
         release("closed", title="data warehouse", closing=RUN_AT - dt.timedelta(minutes=1)),
-        release("catering", title="data warehouse", category="Supplies: General"),
     ], RUN_AT)
-    # "weak" scores zero but stays: score orders the list, it does not gate it.
     assert sorted(df["ocid"]) == ["strong", "weak"]
     assert dropped == 0
+
+
+# --- the new API shape: additionalProcurementCategories ---------------------
+
+def new_release(ocid, extra, main="works", title="RFQ0001", description="", closing=None):
+    if closing is None:
+        closing = (RUN_AT + dt.timedelta(days=5)).isoformat()
+    return {"ocid": ocid, "tender": {
+        "id": ocid, "title": title, "description": description, "status": "",
+        "mainProcurementCategory": main, "additionalProcurementCategories": extra,
+        "procuringEntity": {"id": "1", "name": "Eastern Cape - Agriculture"},
+        "tenderPeriod": {"startDate": closing, "endDate": closing}}}
+
+
+def kept(releases):
+    df, _ = pipeline.select_tenders(releases, RUN_AT)
+    return sorted(df["ocid"])
+
+
+def test_a_consulting_tender_is_kept_even_with_score_zero_and_case_is_ignored():
+    assert kept([new_release("a", ["consultingServices"]),
+                 new_release("b", ["CONSULTINGSERVICES"], main=""),
+                 new_release("c", ["", "consultingServices"])]) == ["a", "b", "c"]
+
+
+def test_a_works_tender_with_score_zero_is_dropped():
+    assert kept([new_release("w", ["works"], description="Repair of fence")]) == []
+
+
+def test_a_works_tender_with_a_keyword_in_the_description_is_kept():
+    assert kept([new_release("w", ["works"], description="Build a data warehouse")]) == ["w"]
+
+
+def test_a_closed_consulting_tender_is_dropped():
+    closed = (RUN_AT - dt.timedelta(days=1)).isoformat()
+    assert kept([new_release("x", ["consultingServices"], closing=closed)]) == []
+
+
+@pytest.mark.parametrize("bad", ["consultingServices", None, [1, 2], [None, 5.5, {}], [""], 7, {"a": 1}])
+def test_a_malformed_additional_categories_never_crashes_and_does_not_match(bad):
+    assert kept([new_release("m", bad)]) == []
+
+
+def test_flatten_takes_category_from_main_category_and_leaves_province_empty():
+    row = pipeline.flatten(new_release("f", ["consultingServices"], main="services"))
+    assert row["category"] == "services" and row["province"] is None
+    assert row["buyer"] == "Eastern Cape - Agriculture"
 
 
 def test_a_tender_closing_exactly_at_run_time_is_kept_and_one_before_is_dropped():

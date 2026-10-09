@@ -38,7 +38,7 @@ def at(y, mo, d, h=6, mi=0, s=0):
 
 def release(ocid, title="Data warehouse support", closing="2026-12-20T11:00:00+02:00",
             category="Services: Professional", **tender):
-    t = {"id": f"T-{ocid}", "title": title, "category": category, "province": "Gauteng",
+    t = {"id": f"T-{ocid}", "title": title, "mainProcurementCategory": category, "additionalProcurementCategories": ["consultingServices"],
          "tenderPeriod": {"endDate": closing, "startDate": "2026-09-28T09:00:00+02:00"},
          "documents": [{"url": f"https://www.etenders.gov.za/{ocid}.pdf"}]}
     t.update(tender)
@@ -557,7 +557,7 @@ KEPT_AND_BLANKED = [
 def _category_ok(rel):
     """Give the releases a wanted category so they reach the table when valid."""
     if isinstance(rel, dict) and isinstance(rel.get("tender"), dict) and "category" not in rel["tender"]:
-        rel = {**rel, "tender": {**rel["tender"], "category": "Services: Professional"}}
+        rel = {**rel, "tender": {**rel["tender"], "additionalProcurementCategories": ["consultingServices"]}}
     return rel
 
 
@@ -823,7 +823,7 @@ def test_ac25_the_deploy_job_needs_the_test_job():
 
 def test_ac24_tuning_is_one_edit_in_pipeline_py():
     for name in ("LOOKBACK_DAYS", "CLOSING_SOON_DAYS", "MISSED_REPORT_DAYS", "KEYWORDS",
-                 "PROVINCES", "CATEGORIES"):
+                 "PROVINCES", "KEEP_ADDITIONAL_CATEGORIES"):
         assert hasattr(pipeline, name)
     for module in (memory, report, function_app, email_sender, digest, TG):
         src = pathlib.Path(module.__file__).read_text(encoding="utf-8")
@@ -849,22 +849,22 @@ def test_ac38_sampling_is_off_in_host_json():
 # =====================================================================================
 
 FIXED = [
-    # (title, description, category, province, expected score, expected keywords)
-    ("Power BI dashboards and reporting", "", "Services: Professional", "Gauteng", 26, "power bi, dashboards, reporting"),
-    ("RFQ2596", "", "Information and communication", "Western Cape", 0, ""),
-    ("Supply of SQL Server licences", "", "Supplies: Computer equipment", "KwaZulu-Natal", 16, "sql server, sql"),
-    ("Mysql and postgresql upkeep", "", "Services: Professional", "Gauteng", 0, ""),
-    ("API and AI work", "", "Other service activities", "Free State", 11, "api, ai"),
-    ("Security guarding", "", "Services: Security", "Gauteng", None, None),            # category not wanted
-    ("Build a school", "", "Construction", "Limpopo", None, None),
+    # (title, description, additional categories, province, expected score, expected keywords)
+    ("Power BI dashboards and reporting", "", ["services"], "Gauteng", 26, "power bi, dashboards, reporting"),
+    ("RFQ2596", "", ["consultingServices"], "Western Cape", 0, ""),
+    ("Supply of SQL Server licences", "", ["goods"], "KwaZulu-Natal", 16, "sql server, sql"),
+    ("Mysql and postgresql upkeep", "", ["CONSULTINGSERVICES"], "Gauteng", 0, ""),
+    ("API and AI work", "", [""], "Free State", 11, "api, ai"),
+    ("Security guarding", "", ["services"], "Gauteng", None, None),   # no category, score 0: dropped
+    ("Build a school", "", ["works"], "Limpopo", None, None),
 ]
 
 
 def test_fixed_regression_set_keeps_the_original_scoring_and_filtering():
     rels = []
-    for i, (title, desc, cat, prov, _, _) in enumerate(FIXED):
+    for i, (title, desc, cats, prov, _, _) in enumerate(FIXED):
         rels.append({"ocid": f"r{i}", "tender": {"id": f"N{i}", "title": title, "description": desc,
-                     "category": cat, "province": prov,
+                     "additionalProcurementCategories": cats,
                      "tenderPeriod": {"endDate": "2099-01-01T00:00:00+02:00"}}})
     df, dropped = pipeline.select_tenders(rels, at(2026, 10, 1))
     assert dropped == 0
@@ -875,16 +875,15 @@ def test_fixed_regression_set_keeps_the_original_scoring_and_filtering():
         assert sorted(got[k][1].split(", ")) == sorted(kw.split(", ")) if kw else got[k][1] == ""
 
 
-def test_province_filter_nationwide_by_default_and_a_correctly_spelled_province_narrows(monkeypatch):
+def test_province_filter_is_nationwide_by_default_and_inert_while_the_api_has_no_province(monkeypatch):
     assert pipeline.PROVINCES == set()
-    rels = [{"ocid": f"p{i}", "tender": {"title": "x", "category": "Services: Professional", "province": p}}
+    rels = [{"ocid": f"p{i}", "tender": {"title": "x", "additionalProcurementCategories": ["consultingServices"],
+                                         "province": p}}
             for i, p in enumerate(["Gauteng", "Western Cape", None])]
     monkeypatch.setattr(pipeline, "PROVINCES", {"gauteng"})
     df, _ = pipeline.select_tenders(rels, at(2026, 10, 1))
-    assert sorted(df["ocid"]) == ["p0", "p2"]      # a tender with no province is kept (as before)
-    monkeypatch.setattr(pipeline, "PROVINCES", {"guateng"})    # the typo the operator once shipped
-    df, _ = pipeline.select_tenders(rels, at(2026, 10, 1))
-    assert sorted(df["ocid"]) == ["p2"]
+    # The API no longer supplies a province, so every row has none and none is dropped.
+    assert sorted(df["ocid"]) == ["p0", "p1", "p2"]
 
 
 def test_every_configured_province_name_is_a_real_south_african_province():
@@ -905,7 +904,7 @@ PAYLOADS = ["=1+1", "+1+1", "-1+1", "@SUM(A1)", "\t=1+1", "\r=1+1", "=cmd|' /C c
 def test_ac21a_no_text_column_can_become_a_formula(payload):
     run = at(2026, 10, 1, 6)
     rel = {"ocid": payload + "x", "tender": {
-        "id": payload, "title": payload, "category": "Services: Professional", "province": payload,
+        "id": payload, "title": payload, "additionalProcurementCategories": ["consultingServices"], "province": payload,
         "procurementMethodDetails": payload, "procuringEntity": {"name": payload},
         "contactPerson": {"email": payload},
         "tenderPeriod": {"endDate": payload, "startDate": payload},
@@ -968,7 +967,7 @@ def test_tg_local_runner_never_touches_the_blob_or_asks_for_a_token(monkeypatch,
     monkeypatch.setattr(memory, "mi_token", forbidden)
     monkeypatch.setattr(memory.BlobStore, "get_text", forbidden)
     monkeypatch.setattr(memory.BlobStore, "put_text", forbidden)
-    run = at(2026, 10, 1, 6)
+    run = dt.datetime.now(dt.timezone.utc)   # TG.main reads the real clock
     api = day_api(run, n=2)
     api.install(monkeypatch)
     TG.main(str(tmp_path / "m.json"), str(tmp_path / "x.xlsx"), str(tmp_path / "e.html"))
