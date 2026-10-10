@@ -21,7 +21,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from digest import DISPLAY_TZ, Digest, is_safe_url, strip_unwritable
+from digest import DISPLAY_TZ, NOT_AI_CHECKED, Digest, is_safe_url, strip_unwritable
 
 OTHER_ROWS_CAP = 25
 
@@ -178,8 +178,11 @@ def _row(r, run_year: int) -> str:
         flags.append(_label("NEW", _NEW_BG))
     if soon:
         flags.append(_label("CLOSING SOON", _SOON))
-    if not pd.isna(r.ai_flag):
-        flags.append(_label(f"AI-flagged ({_e(r.ai_flag)})", _AI_BG))
+    # Llama is the normal decider, so only the exceptions get a label.
+    if r.ai_flag == "nano":
+        flags.append(_label("AI: nano", _AI_BG))
+    elif r.ai_flag == NOT_AI_CHECKED:
+        flags.append(_label("NOT AI-CHECKED", _AI_BG))
 
     if pd.isna(r.closing):
         closes = f"<span{_SMALL}>{_e(r.closing_raw) or 'no closing date'}</span>"
@@ -267,10 +270,18 @@ def _footer(d: Digest) -> list[str]:
     if d.dropped_releases > 0:
         lines.append(_e(f"{int(d.dropped_releases)} malformed release(s) from the eTenders API "
                         "were left out."))
-    if d.tenders["ai_flag"].notna().any():
-        lines.append("AI-flagged: no keyword matched, but an AI model judged the tender relevant. "
-                     "Check AI-flagged (nano) ones more carefully: that model was less accurate "
-                     "in testing.")
+    if d.ai_rejected is not None:
+        flags = set(d.tenders["ai_flag"].dropna())
+        lines.append("Tenders are chosen by an AI model (Llama 3.3 70B) against your data profile.")
+        if "nano" in flags:
+            lines.append("AI: nano marks tenders judged by the fallback model, which was less "
+                         "accurate in testing. Check them more carefully.")
+        if NOT_AI_CHECKED in flags:
+            lines.append("NOT AI-CHECKED marks tenders kept on a keyword match only, because the "
+                         "AI was unavailable for them this run.")
+        if len(d.ai_rejected):
+            lines.append(_e(f"{len(d.ai_rejected)} keyword match(es) the AI rejected are on the "
+                            f'xlsx sheet "{_REJECTED_SHEET}".'))
     if d.total:
         lines.append("The attached xlsx has every tender with all columns, including province, "
                      "contact and published date.")
@@ -330,7 +341,7 @@ def render_html(d: Digest) -> str:
 _XLSX_COLUMNS = (
     ("new", 7), ("closing_soon", 13), ("days_left", 10), ("closing", 17),
     ("tender_number", 18), ("title", 60), ("buyer", 36), ("category", 26),
-    ("province", 16), ("matched_keywords", 28), ("ai_flag", 10), ("blockers", 34),
+    ("province", 16), ("matched_keywords", 28), ("ai_flag", 15), ("blockers", 34),
     ("briefing_compulsory", 20), ("method", 24), ("contact", 30), ("published", 17),
     ("score", 7), ("document", 50), ("closing_raw", 26), ("ocid", 30),
 )
@@ -384,16 +395,31 @@ def _neutralise_formulas(wb) -> None:
                     cell.quotePrefix = True
 
 
+_REJECTED_SHEET = "Keyword match, AI said no"
+
+
 def build_xlsx(d: Digest) -> bytes | None:
-    """One sheet, "Tenders": every row in digest order. None iff there are no rows."""
-    if d.total == 0:
+    """Sheet "Tenders": every row in digest order. When the AI step ran, a
+    second sheet lists the keyword hits it rejected. None iff both are empty."""
+    rejected = d.ai_rejected if d.ai_rejected is not None else d.tenders.iloc[0:0]
+    if d.total == 0 and rejected.empty:
         return None
-    df = d.tenders.copy()
     new_known = d.memory_status != "unavailable"
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Tenders"
+    _write_sheet(ws, d.tenders, new_known)
+    if d.ai_rejected is not None:
+        _write_sheet(wb.create_sheet(_REJECTED_SHEET), rejected, new_known)
+    _neutralise_formulas(wb)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _write_sheet(ws, df: pd.DataFrame, new_known: bool) -> None:
     ws.append([name for name, _ in _XLSX_COLUMNS])
     for r in df.itertuples(index=False):
         ws.append(_xlsx_values(r, new_known))
@@ -425,8 +451,3 @@ def build_xlsx(d: Digest) -> bytes | None:
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
-    _neutralise_formulas(wb)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()

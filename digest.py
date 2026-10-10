@@ -26,6 +26,8 @@ DISPLAY_TZ = dt.timezone(dt.timedelta(hours=2), "SAST")
 MEMORY_STATUSES = ("ok", "first_run", "unavailable")
 HEARTBEAT_STATES = ("on", "off", "misconfigured")
 MISSED_KINDS = ("never_fetched", "only_partly_fetched")
+# ai_flag of a tender kept on its keyword hit because no AI verdict was available.
+NOT_AI_CHECKED = "not AI-checked"
 
 # The columns of Digest.tenders, always all present and in this order,
 # even when there are no rows. Types are in API_CONTRACT.md section 2.3.
@@ -39,7 +41,7 @@ TENDER_COLUMNS = (
     "method",
     "contact",
     "matched_keywords",
-    "ai_flag",  # None, or the model ("Llama", "nano") that kept a tender no keyword matched
+    "ai_flag",  # who decided: "Llama", "nano", "not AI-checked" (keyword fallback); None when the AI is off
     "blockers",
     "closing",
     "published",
@@ -88,6 +90,9 @@ class Digest:
     memory_status: str  # one of MEMORY_STATUSES
     heartbeat: str  # one of HEARTBEAT_STATES
     dropped_releases: int  # malformed API releases left out (FR-23)
+    # Keyword hits the AI said NO to (TENDER_COLUMNS, digest order), for the
+    # xlsx's second sheet; None when the AI step is off (ADR-0028).
+    ai_rejected: pd.DataFrame | None = None
 
 
 MAX_URL_CHARS = 2000

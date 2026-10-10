@@ -191,30 +191,48 @@ def release(ocid, title, closing="2026-12-20T11:00:00+02:00", consulting=False):
 
 
 RELEASES = [
-    release("kw", "Data warehouse support"),                  # keyword hit: already kept
-    release("cons", "Panel of advisors", consulting=True),    # consulting: already kept
-    release("plain", "Qlik developers"),                      # no keyword: a candidate
-    release("plain", "Qlik developers"),                      # duplicate
+    release("kw", "Data warehouse support"),                  # keyword hit
+    release("kw2", "Power BI dashboards"),                    # keyword hit
+    release("cons", "Panel of advisors", consulting=True),    # consulting category only
+    release("plain", "Qlik developers"),                      # no keyword
     release("closed", "Qlik developers", closing="2026-09-01T11:00:00+02:00"),
 ]
 
 
-def test_candidates_are_the_open_tenders_the_rules_leave_out():
-    out = pipeline.ai_candidates(RELEASES, RUN_AT)
-    assert [c["ocid"] for c in out] == ["plain"]
-    assert out[0]["description"] == "About Qlik developers" and out[0]["title"] == "Qlik developers"
+def yes(by="llama"):
+    return {"v": True, "by": by}
 
 
-def test_an_ai_flagged_tender_is_kept_with_its_label():
-    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
-                              ai_flags={"plain": "Llama", "kw": "nano"})
+def no(by="llama"):
+    return {"v": False, "by": by}
+
+
+def test_every_open_tender_is_a_candidate_once():
+    out = pipeline.ai_candidates(RELEASES + [release("plain", "Qlik developers")], RUN_AT)
+    assert [c["ocid"] for c in out] == ["kw", "kw2", "cons", "plain"]
+    assert out[3]["description"] == "About Qlik developers" and out[3]["title"] == "Qlik developers"
+
+
+def test_the_ai_decides_and_keywords_are_only_the_fallback():
+    verdicts = {"kw": no(), "cons": no(), "plain": yes()}  # "kw2" has no verdict
+    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT, ai=verdicts)
     flags = dict(zip(d.tenders["ocid"], d.tenders["ai_flag"]))
-    assert flags == {"kw": None, "cons": None, "plain": "Llama"}  # keywords win: no label on "kw"
+    # plain: AI said YES. kw2: no verdict, kept on its keyword. kw: keyword, but AI said NO.
+    # cons: the consulting category alone no longer keeps a tender.
+    assert flags == {"plain": "Llama", "kw2": pipeline.NOT_AI_CHECKED}
+    assert list(d.ai_rejected["ocid"]) == ["kw"]  # a rejected keyword hit, for the xlsx
 
 
-def test_without_ai_flags_the_digest_is_unchanged():
+def test_a_nano_yes_is_kept_and_labelled_nano():
+    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
+                              ai={"plain": yes("nano"), "kw": no(), "kw2": no(), "cons": no()})
+    assert list(d.tenders["ocid"]) == ["plain"] and list(d.tenders["ai_flag"]) == ["nano"]
+
+
+def test_with_the_ai_off_the_old_rule_applies():
     d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT)
-    assert sorted(d.tenders["ocid"]) == ["cons", "kw"] and d.tenders["ai_flag"].isna().all()
+    assert sorted(d.tenders["ocid"]) == ["cons", "kw", "kw2"] and d.tenders["ai_flag"].isna().all()
+    assert d.ai_rejected is None
 
 
 # --- memory -------------------------------------------------------------------
@@ -268,20 +286,44 @@ def test_the_identity_token_names_the_resource_it_is_for(monkeypatch):
 
 # --- report -------------------------------------------------------------------
 
-def test_the_email_and_xlsx_show_which_model_flagged_a_tender():
-    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
-                              ai_flags={"plain": "nano"})
-    body = report.render_html(d)
-    assert "AI-flagged (nano)" in body and "less accurate" in body
-    ws = openpyxl.load_workbook(io.BytesIO(report.build_xlsx(d)))["Tenders"]
+def column(ws, name):
     headers = [c.value for c in ws[1]]
-    values = [ws.cell(r, headers.index("ai_flag") + 1).value for r in range(2, ws.max_row + 1)]
-    assert {v for v in values if v} == {"nano"}
+    return [ws.cell(r, headers.index(name) + 1).value for r in range(2, ws.max_row + 1)]
 
 
-def test_no_ai_note_when_nothing_was_ai_flagged():
+def test_only_the_exceptions_get_a_label_in_the_email():
+    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
+                              ai={"plain": yes("nano"), "kw": yes(), "cons": no()})  # kw2: none
+    body = report.render_html(d)
+    assert "AI: nano" in body and "NOT AI-CHECKED" in body
+    assert body.count(">AI: nano<") == 1 and body.count(">NOT AI-CHECKED<") == 1  # kw (Llama): no label
+    assert "chosen by an AI model" in body and "less accurate" in body
+
+
+def test_the_xlsx_shows_who_decided_and_lists_the_rejected_keyword_hits():
+    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
+                              ai={"plain": yes(), "kw": no(), "kw2": yes("nano"), "cons": no()})
+    wb = openpyxl.load_workbook(io.BytesIO(report.build_xlsx(d)))
+    assert wb.sheetnames == ["Tenders", "Keyword match, AI said no"]
+    assert sorted(column(wb["Tenders"], "ai_flag")) == ["Llama", "nano"]
+    assert column(wb["Keyword match, AI said no"], "ocid") == ["kw"]
+    assert "1 keyword match(es) the AI rejected" in report.render_html(d)
+
+
+def test_an_empty_digest_still_sends_the_rejected_sheet():
+    d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT,
+                              ai={"plain": no(), "kw": no(), "kw2": no(), "cons": no()})
+    assert d.total == 0
+    wb = openpyxl.load_workbook(io.BytesIO(report.build_xlsx(d)))
+    assert sorted(column(wb["Keyword match, AI said no"], "ocid")) == ["kw", "kw2"]
+
+
+def test_with_the_ai_off_there_is_no_ai_note_or_second_sheet():
     d = pipeline.build_digest(RELEASES, [], None, "first_run", "off", RUN_AT)
-    assert "AI-flagged" not in report.render_html(d)
+    body = report.render_html(d)
+    assert "chosen by an AI model" not in body and "AI: nano" not in body
+    assert "NOT AI-CHECKED" not in body and "AI rejected" not in body
+    assert openpyxl.load_workbook(io.BytesIO(report.build_xlsx(d))).sheetnames == ["Tenders"]
 
 
 def test_the_ai_label_colour_meets_wcag_aa_contrast():
@@ -315,7 +357,7 @@ def test_a_run_uses_remembered_verdicts_and_saves_new_ones(tmp_path, monkeypatch
 
     def fake_classify(items, budget_s):
         asked.extend(t["ocid"] for t in items)
-        return {"plain": {"v": True, "by": "llama"}}, {"llama": 1}
+        return {"plain": yes(), "kw": no(), "kw2": no(), "cons": no()}, {"llama": 4}
 
     monkeypatch.setattr(classify, "classify", fake_classify)
     store = memory.FileStore(str(tmp_path / "m.json"))
@@ -326,12 +368,12 @@ def test_a_run_uses_remembered_verdicts_and_saves_new_ones(tmp_path, monkeypatch
     summary = function_app.run(RUN_AT, store, mailer.send_report, mailer.send_failure_notice,
                                lambda url, body: "ok")
 
-    assert asked == ["plain"]  # "old" was remembered, so it was not asked again
+    assert asked == ["kw", "kw2", "cons", "plain"]  # "old" was remembered, so not asked again
     flags = dict(zip(mailer.digests[0].tenders["ocid"], mailer.digests[0].tenders["ai_flag"]))
-    assert flags["plain"] == "Llama" and flags["old"] == "nano"
-    assert summary["ai"] == {"remembered": 1, "llama": 1}
+    assert flags == {"plain": "Llama", "old": "nano"}
+    assert summary["ai"] == {"remembered": 1, "llama": 4}
     saved, _, _ = memory.load(store, RUN_AT)
-    assert set(saved["ai"]) == {"old", "plain"}
+    assert set(saved["ai"]) == {"old", "plain", "kw", "kw2", "cons"}
 
 
 def test_with_the_switch_off_no_ai_step_runs(tmp_path, monkeypatch):

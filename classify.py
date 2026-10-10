@@ -1,11 +1,11 @@
-"""AI second look: open tenders the keyword filter left out, judged by an LLM.
+"""The AI step: an LLM decides which open tenders go in the digest (ADR-0028).
 
 Each candidate goes to Llama 3.3 70B on Cloudflare Workers AI (free plan:
 10,000 neurons a day, about 7 per tender). If Cloudflare fails or the
 allowance runs out, the rest go to gpt-5-nano on Azure OpenAI, reached with
 the Function's managed identity (no key), until this run has spent
-NANO_CAP_ZAR. A tender neither model answered stays unclassified, keeps
-today's keyword result, and is tried again next run. Verdicts are remembered
+NANO_CAP_ZAR. A tender neither model answered stays unclassified, falls
+back to its keyword result, and is tried again next run. Verdicts are remembered
 in the run memory ("ai"), so each tender is judged once.
 
 Off unless LLM_ENABLED=true. Never raises; never logs a token, key, URL or
@@ -37,9 +37,6 @@ BUDGET_S = 90              # no new call starts after this; fetching already use
 WORKERS = 4                # parallel calls, kept low for Cloudflare's rate limit
 CALL_TIMEOUT_S = 20
 DESCRIPTION_CHARS = 600
-
-# What the email shows for each model.
-LABELS = {"llama": "Llama", "nano": "nano"}
 
 PROMPT = (
     "You help a South African data professional find government tenders for "

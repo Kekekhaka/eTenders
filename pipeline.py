@@ -15,7 +15,8 @@ from dataclasses import dataclass
 import pandas as pd
 import requests
 
-from digest import TENDER_COLUMNS, Digest, MissedDay, PartialDay, is_safe_url, strip_unwritable
+from digest import (NOT_AI_CHECKED, TENDER_COLUMNS, Digest, MissedDay, PartialDay, is_safe_url,
+                    strip_unwritable)
 
 logger = logging.getLogger(__name__)
 
@@ -372,19 +373,20 @@ _FLAT_COLUMNS = [c for c in TENDER_COLUMNS
                  if c not in ("days_left", "closing_soon", "is_new", "ai_flag")]
 
 AI_DESCRIPTION_CHARS = 600
+# ai_flag values: who decided that a tender is in the digest (ADR-0028);
+# NOT_AI_CHECKED (from digest.py) marks the keyword fallback.
+AI_LABELS = {"llama": "Llama", "nano": "nano"}
 
 
 def ai_candidates(releases: list, run_at: dt.datetime) -> list[dict]:
-    """The open tenders the rules below would leave out, for classify.py:
-    dicts of ocid, title, buyer, category and description, one per ocid."""
+    """Every open tender, for classify.py: dicts of ocid, title, buyer,
+    category and description, one per ocid. The AI decides for all of them."""
     out, seen = [], set()
     for rel in releases:
         row = flatten(rel)
         if row is None or row["ocid"] in seen:
             continue
         seen.add(row["ocid"])
-        if row["score"] > 0 or _has_kept_category(rel):
-            continue  # already in the digest
         if not pd.isna(row["closing"]) and row["closing"] < run_at:
             continue  # closed
         description = _text(_obj(rel.get("tender")).get("description")) or ""
@@ -395,13 +397,23 @@ def ai_candidates(releases: list, run_at: dt.datetime) -> list[dict]:
 
 
 def select_tenders(releases: list, run_at: dt.datetime,
-                   ai_flags: dict | None = None) -> tuple[pd.DataFrame, int]:
-    """Validate the releases and keep the open tenders in the wanted
-    consulting categories or keyword hits (and provinces, when PROVINCES is set),
-    plus those in ai_flags (ocid -> the model's label, e.g. "Llama"). Returns
-    (tenders, dropped), where dropped counts the releases flatten rejected.
-    The rows are not flagged or sorted yet; build_digest does that."""
-    ai_flags = ai_flags or {}
+                   ai: dict | None = None) -> tuple[pd.DataFrame, int]:
+    """The digest's open tenders and the dropped count; see _select."""
+    kept, _, dropped = _select(releases, run_at, ai)
+    return kept, dropped
+
+
+def _select(releases: list, run_at: dt.datetime,
+            ai: dict | None) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    """Validate the releases and choose the open tenders (in PROVINCES, when set).
+
+    ai is None when the AI step is off: keep a consulting-category tender or a
+    keyword hit. Otherwise ai maps ocid to {"v": relevant, "by": model} and
+    the AI decides (ADR-0028): a YES is kept, a NO is not, and a tender with
+    no verdict falls back to its keyword hit. Returns (kept, rejected,
+    dropped): rejected holds the keyword hits the AI said NO to, for the
+    xlsx's second sheet; dropped counts the releases flatten rejected. The
+    rows are not flagged or sorted yet; build_digest does that."""
     rows, keep, dropped = [], [], 0
     for rel in releases:
         row = flatten(rel)
@@ -426,13 +438,22 @@ def select_tenders(releases: list, run_at: dt.datetime,
         province = df["province"].fillna("").str.lower()
         df = df[province.isin(PROVINCES) | (province == "")]
 
-    # Keep a consulting-category tender, any tender with a keyword hit, or
-    # one an AI model judged relevant. Score then orders the list.
-    df["ai_flag"] = pd.Series([ai_flags.get(o) for o in df["ocid"]], index=df.index, dtype=object)
-    keyword_kept = df["_keep"] | (df["score"] > 0)
-    df.loc[keyword_kept, "ai_flag"] = None  # the label only marks tenders the keywords missed
-    df = df[keyword_kept | df["ai_flag"].notna()].drop(columns="_keep")
-    return df.reset_index(drop=True), dropped
+    keyword_hit = df["score"] > 0
+    if ai is None:
+        keep = df["_keep"] | keyword_hit
+        df["ai_flag"] = pd.Series(None, index=df.index, dtype=object)
+        rejected = df.iloc[0:0]
+    else:
+        verdict = [ai.get(o) for o in df["ocid"]]
+        checked = pd.Series([v is not None for v in verdict], index=df.index, dtype=bool)
+        said_yes = pd.Series([bool(v and v["v"]) for v in verdict], index=df.index, dtype=bool)
+        df["ai_flag"] = pd.Series([AI_LABELS.get(v["by"]) if v else NOT_AI_CHECKED for v in verdict],
+                                  index=df.index, dtype=object)
+        keep = said_yes | (~checked & keyword_hit)
+        rejected = df[checked & ~said_yes & keyword_hit]
+    df = df.drop(columns="_keep")
+    return (df[keep].reset_index(drop=True), rejected.drop(columns="_keep").reset_index(drop=True),
+            dropped)
 
 
 def _days_left(closing: pd.Series, run_at: dt.datetime) -> pd.Series:
@@ -442,18 +463,10 @@ def _days_left(closing: pd.Series, run_at: dt.datetime) -> pd.Series:
                      index=closing.index, dtype="Int64")
 
 
-def build_digest(releases: list, day_results: list[DayResult], memory: dict | None,
-                 memory_status: str, heartbeat: str, run_at: dt.datetime,
-                 missed: list[MissedDay] = (), ai_flags: dict | None = None) -> Digest:
-    """Everything one email says, computed once from one clock (run_at).
-    Pure: no I/O. memory_status is memory.load's status; any
-    "unavailable:<reason>" becomes "unavailable" here (the reason goes to
-    RUN_SUMMARY only). `missed` is memory.missed_days(...), passed in so that
-    this module never imports memory.py. ai_flags: see select_tenders."""
-    window = window_for(run_at)
-    status = "unavailable" if memory_status.startswith("unavailable") else memory_status
-    df, dropped = select_tenders(releases, run_at, ai_flags)
-
+def _flag_and_sort(df: pd.DataFrame, memory: dict | None, status: str,
+                   run_at: dt.datetime) -> pd.DataFrame:
+    """Add the NEW, CLOSING SOON and days-left columns, then sort (FR-13)."""
+    df = df.copy()
     if status == "ok":
         df["is_new"] = ~df["ocid"].isin(list(memory["sent"]))
     else:
@@ -469,7 +482,21 @@ def build_digest(releases: list, day_results: list[DayResult], memory: dict | No
         ascending=[False, False, True, True, True],
         na_position="last", kind="stable",
     )
-    df = df[list(TENDER_COLUMNS)].reset_index(drop=True)
+    return df[list(TENDER_COLUMNS)].reset_index(drop=True)
+
+
+def build_digest(releases: list, day_results: list[DayResult], memory: dict | None,
+                 memory_status: str, heartbeat: str, run_at: dt.datetime,
+                 missed: list[MissedDay] = (), ai: dict | None = None) -> Digest:
+    """Everything one email says, computed once from one clock (run_at).
+    Pure: no I/O. memory_status is memory.load's status; any
+    "unavailable:<reason>" becomes "unavailable" here (the reason goes to
+    RUN_SUMMARY only). `missed` is memory.missed_days(...), passed in so that
+    this module never imports memory.py. ai: the AI verdicts, see _select."""
+    window = window_for(run_at)
+    status = "unavailable" if memory_status.startswith("unavailable") else memory_status
+    df, rejected, dropped = _select(releases, run_at, ai)
+    df = _flag_and_sort(df, memory, status, run_at)
 
     partial = sorted((PartialDay(r.day, r.reason) for r in day_results
                       if not r.ok and window[0] <= r.day <= window[1]),
@@ -488,4 +515,5 @@ def build_digest(releases: list, day_results: list[DayResult], memory: dict | No
         memory_status=status,
         heartbeat=heartbeat,
         dropped_releases=dropped,
+        ai_rejected=None if ai is None else _flag_and_sort(rejected, memory, status, run_at),
     )

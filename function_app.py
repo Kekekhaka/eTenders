@@ -104,13 +104,13 @@ def _day_summary(r: pipeline.DayResult) -> dict:
 
 
 def _classify(releases: list, mem: dict | None, run_at: dt.datetime,
-              summary: dict, started: float) -> tuple[dict, dict]:
-    """The AI second look (classify.py). Returns (ai_flags, new verdicts):
-    ai_flags maps each ocid a model judged relevant, remembered or new, to
-    the model's label for the email."""
+              summary: dict, started: float) -> tuple[dict | None, dict]:
+    """The AI step (classify.py, ADR-0028). Returns (verdicts, new): every
+    verdict for this run, remembered or new, keyed by ocid (None when the AI
+    is off), and the new ones, for the memory."""
     if not classify.enabled():
         summary["ai"] = "off"
-        return {}, {}
+        return None, {}
     remembered = mem.get("ai", {}) if mem else {}
     candidates = pipeline.ai_candidates(releases, run_at)
     todo = [t for t in candidates if t["ocid"] not in remembered]
@@ -118,9 +118,7 @@ def _classify(releases: list, mem: dict | None, run_at: dt.datetime,
     budget = min(classify.BUDGET_S, AI_LAST_START_S - (time.monotonic() - started))
     new, stats = classify.classify(todo, budget_s=max(budget, 0))
     summary["ai"] = {"remembered": len(candidates) - len(todo), **stats}
-    verdicts = {**remembered, **new}
-    flags = {ocid: classify.LABELS[v["by"]] for ocid, v in verdicts.items() if v["v"]}
-    return flags, new
+    return {**remembered, **new}, new
 
 
 def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_id: str,
@@ -136,10 +134,10 @@ def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_
     releases, days = pipeline.fetch_releases(*window)
     summary["days"] = [_day_summary(r) for r in days]
 
-    ai_flags, ai_new = _classify(releases, mem, run_at, summary, started)
+    verdicts, ai_new = _classify(releases, mem, run_at, summary, started)
 
     missed = memory.missed_days(mem, window)
-    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed, ai_flags)
+    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed, verdicts)
     summary["dropped_releases"] = d.dropped_releases
     summary["counts"] = {"total": d.total, "new": d.new_count, "closing_soon": d.closing_soon_count}
     summary["missed_named"] = [m.day.isoformat() for m in d.missed_days[:MISSED_NAMED_CAP]]
