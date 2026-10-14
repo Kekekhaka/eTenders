@@ -98,9 +98,11 @@ def ping_heartbeat(url: str, body: dict) -> str:
 # --- the run -------------------------------------------------------------------
 
 def _day_summary(r: pipeline.DayResult) -> dict:
-    if r.ok:
-        return {"day": r.day.isoformat(), "ok": True}
-    return {"day": r.day.isoformat(), "ok": False, "reason": (r.reason or "")[:REASON_CHARS]}
+    out = ({"day": r.day.isoformat(), "ok": True} if r.ok else
+           {"day": r.day.isoformat(), "ok": False, "reason": (r.reason or "")[:REASON_CHARS]})
+    if r.skipped:
+        out["skipped"] = r.skipped
+    return out
 
 
 def _classify(releases: list, mem: dict | None, run_at: dt.datetime,

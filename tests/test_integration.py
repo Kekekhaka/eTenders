@@ -344,7 +344,7 @@ def test_digest_has_exactly_the_contracted_fields():
     assert [f.name for f in dataclasses.fields(digest.Digest)] == [
         "run_at", "window", "tenders", "total", "new_count", "closing_soon_count",
         "closing_soon_days", "partial_days", "missed_days", "memory_status",
-        "heartbeat", "dropped_releases", "ai_rejected"]
+        "heartbeat", "dropped_releases", "ai_rejected", "skipped_releases"]
     assert [f.name for f in dataclasses.fields(digest.PartialDay)] == ["day", "reason"]
     assert [f.name for f in dataclasses.fields(digest.MissedDay)] == ["day", "kind", "left_window_on"]
 

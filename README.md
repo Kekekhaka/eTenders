@@ -2,7 +2,7 @@
 
 Twice a day (08:00 and 20:00 SAST) this Azure Function fetches the last five days of South African government tenders from the eTenders OCDS API. An AI model decides which open tenders fit a data-engineering and BI profile, and keywords are only the fallback. It then emails a ranked HTML summary plus an xlsx. The running cost is about R1 a month.
 
-The eTenders API is unreliable: it often returns HTTP 500 for whole days. So it is called one day at a time, newest first, under a time budget. If some days cannot be fetched, the email still goes out, marked **Partial digest** and naming the missing dates. Later runs try those days again.
+The eTenders API is unreliable. It is called one day at a time, newest first, under a time budget. It answers HTTP 500 when a page contains a record it cannot serve, so a failing page is split in halves until the bad record is alone and only that record is skipped (ADR-0029). The email footer says how many records were skipped. If a whole day cannot be fetched (the server is down, or a timeout), the email still goes out, marked **Partial digest** and naming the missing dates, and later runs try that day again.
 
 ## How a tender gets into the digest
 
@@ -120,7 +120,7 @@ Prices are from the Azure Retail Prices API (ZAR, South Africa North) and Cloudf
 
 ## Known limits
 
-- **The eTenders API** fails for many weekdays. Those days show as partial, and then as missed if they never recover.
+- **The eTenders API** cannot serve some records (1 to 7 a day in October 2026, usually among the first of the day). They are skipped and counted in the email footer, so a relevant tender could be missing: search etenders.gov.za by hand if you suspect a gap. Whole days still fail when the server is down or times out.
 - **AI accuracy** comes from a small sample with only 4 relevant tenders. For the first weeks, watch the *Keyword match, AI said no* sheet for tenders the AI wrongly rejected.
 - **Cloudflare's rate limit** is 300 requests a minute for text models on the free plan (Workers AI limits page, 2026-10-09). With `WORKERS = 4` that holds if a call takes 0.8 s or more; the real call time from Azure is not measured yet. If `RUN_SUMMARY` shows `cf_off: "http_429"` while the dashboard shows neurons left, lower `WORKERS` in `classify.py` to 2. To check, run this in Application Insights → Logs: `traces | where message startswith "RUN_SUMMARY" | top 1 by timestamp`.
 - **First run after a memory reset:** every tender is marked NEW. Gmail may clip a large email (about 102 KB); open the xlsx.
@@ -128,7 +128,7 @@ Prices are from the Azure Retail Prices API (ZAR, South Africa North) and Cloudf
 
 ## Decisions and history
 
-- **Architecture decisions:** `docs/adr/` (ADR-0026 is the cost guardrail, ADR-0027 the AI step, ADR-0028 the AI as decider).
+- **Architecture decisions:** `docs/adr/` (ADR-0026 is the cost guardrail, ADR-0027 the AI step, ADR-0028 the AI as decider, ADR-0029 skipping bad API records).
 - **Team decisions:** `docs/cosmos/TEAM_LEADER_DECISIONS.md`.
 - **Sign-off:** `docs/cosmos/SIGN_OFF.md`.
 - **Specification:** `docs/cosmos/REQUIREMENTS_PACK.md`, `DESIGN_SPEC.md`, `API_CONTRACT.md`.

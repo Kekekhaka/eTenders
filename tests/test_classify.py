@@ -396,3 +396,30 @@ def test_the_cloudflare_token_is_redacted(monkeypatch):
 def test_the_window_has_lookback_plus_one_days_with_the_configured_values():
     first, last = pipeline.window_for(RUN_AT)
     assert (last - first).days == pipeline.LOOKBACK_DAYS
+
+
+# --- records the API could not serve (ADR-0029) ---------------------------------
+
+def day(d, skipped=0):
+    return pipeline.DayResult(dt.date(2026, 10, d), True, None, skipped)
+
+
+def test_skipped_records_in_the_window_are_counted_in_the_digest():
+    days = [day(1, skipped=2), day(1, skipped=1)]  # both inside the window that ends on 1 October
+    d = pipeline.build_digest(RELEASES, days, None, "first_run", "off", RUN_AT)
+    assert d.skipped_releases == 3
+    outside = pipeline.DayResult(dt.date(2026, 8, 1), True, None, 5)  # long before the window
+    assert pipeline.build_digest(RELEASES, [outside], None, "first_run", "off", RUN_AT).skipped_releases == 0
+
+
+def test_the_email_says_how_many_records_could_not_be_read():
+    d = pipeline.build_digest(RELEASES, [day(1, skipped=2)], None, "first_run", "off", RUN_AT)
+    body = report.render_html(d)
+    assert "2 tender record(s) could not be read" in body and "search https://www.etenders.gov.za/" in body
+    clean = pipeline.build_digest(RELEASES, [day(1)], None, "first_run", "off", RUN_AT)
+    assert "could not be read" not in report.render_html(clean)
+
+
+def test_run_summary_lists_skipped_records_per_day():
+    assert function_app._day_summary(day(1, skipped=2)) == {"day": "2026-10-01", "ok": True, "skipped": 2}
+    assert function_app._day_summary(day(1)) == {"day": "2026-10-01", "ok": True}

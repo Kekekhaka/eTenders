@@ -270,6 +270,10 @@ def _footer(d: Digest) -> list[str]:
     if d.dropped_releases > 0:
         lines.append(_e(f"{int(d.dropped_releases)} malformed release(s) from the eTenders API "
                         "were left out."))
+    if d.skipped_releases > 0:
+        lines.append(_e(f"{int(d.skipped_releases)} tender record(s) could not be read because the "
+                        "eTenders API returns an error for them. They are left out, so a tender may "
+                        f"be missing: search {_ETENDERS} by hand if you suspect a gap."))
     if d.ai_rejected is not None:
         flags = set(d.tenders["ai_flag"].dropna())
         lines.append("Tenders are chosen by an AI model (Llama 3.3 70B) against your data profile.")

@@ -93,6 +93,9 @@ class Digest:
     # Keyword hits the AI said NO to (TENDER_COLUMNS, digest order), for the
     # xlsx's second sheet; None when the AI step is off (ADR-0028).
     ai_rejected: pd.DataFrame | None = None
+    # Records in the window that the eTenders API answered with an error and
+    # that were left out, so a tender may be missing (ADR-0029).
+    skipped_releases: int = 0
 
 
 MAX_URL_CHARS = 2000

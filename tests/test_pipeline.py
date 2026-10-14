@@ -157,7 +157,7 @@ def test_days_are_fetched_newest_first_each_once(monkeypatch):
 
     def fake_day(session, day, deadline):
         asked.append(day)
-        return [], True
+        return [], True, 0
 
     monkeypatch.setattr(pipeline, "_fetch_day", fake_day)
     _, results = pipeline.fetch_releases(dt.date(2026, 9, 20), dt.date(2026, 9, 22))
@@ -174,9 +174,9 @@ def test_pagination_stops_on_an_empty_page_not_a_short_one(monkeypatch):
         [],
     ])
     monkeypatch.setattr(pipeline, "_get_page", lambda *args: next(pages))
-    got, complete = pipeline._fetch_day(None, "2026-09-24", deadline=float("inf"))
+    got, complete, skipped = pipeline._fetch_day(None, "2026-09-24", deadline=float("inf"))
     assert len(got) == 172
-    assert complete
+    assert complete and skipped == 0
 
 
 def test_a_day_cut_short_by_the_page_limit_is_kept_but_not_ok(monkeypatch):
@@ -220,7 +220,9 @@ def test_a_page_whose_releases_is_not_a_list_makes_that_day_partial(monkeypatch)
 
 
 def test_an_http_error_is_reported_as_http_and_its_code(monkeypatch):
-    fake_api(monkeypatch, {"2026-09-30": [503, 503]})
+    monkeypatch.setattr(pipeline, "RETRY_BACKOFF_SECONDS", 0)
+    session = FakeSession(by_params=lambda params: FakeResponse({}, status=503))  # every request fails
+    monkeypatch.setattr(pipeline.requests, "Session", lambda: session)
     _, results = pipeline.fetch_releases(dt.date(2026, 9, 30), dt.date(2026, 9, 30))
     assert results == [DayResult(dt.date(2026, 9, 30), False, "http_503")]
 
@@ -238,7 +240,7 @@ def test_a_failing_day_is_reported_without_losing_the_other_days(monkeypatch):
     def fake_day(session, day, deadline):
         if day == "2026-09-23":
             raise requests.ReadTimeout("simulated slow API")
-        return [release(f"ocds-{day}"), release("ocds-shared")], True
+        return [release(f"ocds-{day}"), release("ocds-shared")], True, 0
 
     monkeypatch.setattr(pipeline, "_fetch_day", fake_day)
     releases, results = pipeline.fetch_releases(dt.date(2026, 9, 22), dt.date(2026, 9, 24))
@@ -253,7 +255,7 @@ def test_the_dedupe_passes_malformed_releases_through_without_crashing(monkeypat
     # A non-dict release once crashed rel.get("ocid") here (S-04).
     bad = ["x", {"tender": {}}, {"ocid": 123}, {"ocid": "o" * 201}]
     monkeypatch.setattr(pipeline, "_fetch_day",
-                        lambda s, day, d: (bad + [release("good"), release("good")], True))
+                        lambda s, day, d: (bad + [release("good"), release("good")], True, 0))
     releases, _ = pipeline.fetch_releases(dt.date(2026, 9, 30), dt.date(2026, 9, 30))
     assert releases == bad + [release("good")]
 
@@ -566,3 +568,104 @@ def test_the_counts_match_the_rows():
     assert d.total == len(d.tenders) == 2
     assert d.closing_soon_count == int(d.tenders["closing_soon"].sum()) == 1
     assert d.dropped_releases == 1
+
+
+# --- a page the API cannot serve: split it, skip only the bad records (ADR-0029) --
+
+class PoisonApi:
+    """A fake API whose records are numbered 1..total. Any request whose page
+    holds a record in `bad` answers HTTP 500 with no body, as the real one does."""
+
+    def __init__(self, total, bad=(), always_500=False):
+        self.total, self.bad, self.always_500 = total, set(bad), always_500
+        self.calls = []
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "RETRY_BACKOFF_SECONDS", 0)
+        session = FakeSession(by_params=self.answer)
+        monkeypatch.setattr(pipeline.requests, "Session", lambda: session)
+        return session
+
+    def answer(self, params):
+        self.calls.append((params["PageNumber"], params["PageSize"]))
+        first = (params["PageNumber"] - 1) * params["PageSize"] + 1
+        last = min(params["PageNumber"] * params["PageSize"], self.total)
+        numbers = list(range(first, last + 1))
+        if self.always_500 or self.bad & set(numbers):
+            return FakeResponse({}, status=500)
+        return FakeResponse({"releases": [release(f"r{n}") for n in numbers]})
+
+
+DAY = dt.date(2026, 9, 30)
+
+
+def fetch_poison(monkeypatch, api):
+    api.install(monkeypatch)
+    return pipeline.fetch_releases(DAY, DAY)
+
+
+def test_the_page_size_is_a_power_of_two_so_halves_are_exact():
+    assert pipeline.PAGE_SIZE & (pipeline.PAGE_SIZE - 1) == 0
+
+
+def test_a_bad_record_is_skipped_and_every_other_record_is_kept(monkeypatch):
+    api = PoisonApi(total=200, bad={1, 3})
+    releases, results = fetch_poison(monkeypatch, api)
+    assert sorted(r["ocid"] for r in releases) == sorted(f"r{n}" for n in range(1, 201) if n not in (1, 3))
+    assert results == [DayResult(DAY, True, None, skipped=2)]
+
+
+def test_a_bad_record_in_the_middle_or_end_of_a_big_day(monkeypatch):
+    api = PoisonApi(total=1500, bad={700, 1500})  # two pages of 1024
+    releases, results = fetch_poison(monkeypatch, api)
+    assert len(releases) == 1498 and results == [DayResult(DAY, True, None, skipped=2)]
+
+
+def test_finding_a_bad_record_costs_about_two_requests_per_level(monkeypatch):
+    api = PoisonApi(total=200, bad={1})
+    fetch_poison(monkeypatch, api)
+    assert len(api.calls) < 40
+
+
+def test_a_healthy_day_makes_no_extra_requests(monkeypatch):
+    api = PoisonApi(total=200)
+    releases, results = fetch_poison(monkeypatch, api)
+    assert len(releases) == 200 and results == [DayResult(DAY, True, None)]
+    assert api.calls == [(1, pipeline.PAGE_SIZE), (2, pipeline.PAGE_SIZE)]  # the data, then the empty page
+
+
+def test_a_server_that_is_down_fails_the_day_and_is_not_hammered(monkeypatch):
+    api = PoisonApi(total=200, always_500=True)
+    releases, results = fetch_poison(monkeypatch, api)
+    assert releases == [] and results == [DayResult(DAY, False, "http_500")]
+    assert len(api.calls) <= pipeline.MAX_SPLIT_REQUESTS + pipeline.MAX_RETRIES
+
+
+def test_too_many_bad_records_fail_the_day(monkeypatch):
+    api = PoisonApi(total=200, bad=set(range(1, 60)))
+    releases, results = fetch_poison(monkeypatch, api)
+    assert releases == [] and results == [DayResult(DAY, False, "http_500")]
+
+
+def test_a_timeout_is_not_a_bad_record_and_is_not_split(monkeypatch):
+    calls = []
+
+    class Slow(FakeSession):
+        def get(self, url, params=None, timeout=None):
+            calls.append(params["PageSize"])
+            raise requests.ReadTimeout("slow")
+
+    monkeypatch.setattr(pipeline, "RETRY_BACKOFF_SECONDS", 0)
+    session = Slow()
+    monkeypatch.setattr(pipeline.requests, "Session", lambda: session)
+    _, results = pipeline.fetch_releases(DAY, DAY)
+    assert results == [DayResult(DAY, False, "ReadTimeout")]
+    assert set(calls) == {pipeline.PAGE_SIZE}
+
+
+def test_a_client_error_is_not_split(monkeypatch):
+    fake_api(monkeypatch, {"2026-09-30": [404, 404]})
+    session_calls = pipeline.requests.Session().calls
+    _, results = pipeline.fetch_releases(DAY, DAY)
+    assert results == [DayResult(DAY, False, "http_404")]
+    assert {c["PageSize"] for c in session_calls} == {pipeline.PAGE_SIZE}

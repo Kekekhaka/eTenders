@@ -41,8 +41,17 @@ MISSED_REPORT_DAYS = 5     # name a permanently missed day for this many days
 #
 # PageSize is an upper bound only: a page returns an arbitrary number of
 # releases below it, so the end of the data is an empty page, never a short one.
-PAGE_SIZE = 2000
+#
+# A power of two, so a failing page can be split into exact halves (ADR-0029).
+PAGE_SIZE = 1024
 MAX_PAGES = 50
+# The API answers HTTP 500 with an empty body when a page holds a record it cannot
+# serve (seen October 2026: 1 to 3 such records on a day, 100+ fine ones). A
+# failing page is split in halves until the bad record is alone, and only that
+# record is skipped. Both limits stop a server that is simply down from being
+# hammered: past either, the day fails as it did before.
+MAX_SKIPPED_PER_DAY = 20
+MAX_SPLIT_REQUESTS = 120
 # Total wall-clock allowed for fetching, leaving room under host.json's
 # functionTimeout (00:10:00, the max on Consumption) for scoring and email.
 FETCH_BUDGET_SECONDS = 420
@@ -119,6 +128,7 @@ class DayResult:
     day: dt.date
     ok: bool            # every page fetched, without an error and without hitting MAX_PAGES
     reason: str | None  # None when ok; else "out of time", "page limit", "http_<code>" or an exception name
+    skipped: int = 0    # records the API could not serve and that were left out (the day is still ok)
 
 
 def window_for(run_at: dt.datetime) -> tuple[dt.date, dt.date]:
@@ -141,14 +151,19 @@ def _reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _get_page(session: requests.Session, params: dict, deadline: float) -> list:
+def _get_page(session: requests.Session, params: dict, deadline: float,
+              attempts: int | None = None, pause: float | None = None,
+              quiet: bool = False) -> list:
     """GET one page and return its releases ([] at the end of the data).
 
     Retries transient failures (timeouts, 5xx, the HTTP 200 non-JSON error
     pages the API serves under load, and a `releases` that is not a list),
-    never past the deadline."""
+    never past the deadline. attempts and pause default to MAX_RETRIES and
+    RETRY_BACKOFF_SECONDS, read when called."""
+    attempts = MAX_RETRIES if attempts is None else attempts
+    pause = RETRY_BACKOFF_SECONDS if pause is None else pause
     last_exc = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, attempts + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -166,29 +181,85 @@ def _get_page(session: requests.Session, params: dict, deadline: float) -> list:
             return releases
         except (requests.RequestException, ValueError, RecursionError) as exc:  # a hostile page can nest too deep
             last_exc = exc
-            logger.warning("Attempt %d/%d failed for %s: %s",
-                           attempt, MAX_RETRIES, params.get("dateFrom"), _reason(exc))
-            if attempt < MAX_RETRIES:
-                time.sleep(min(RETRY_BACKOFF_SECONDS * attempt,
-                               max(deadline - time.monotonic(), 0)))
+            if not quiet:
+                logger.warning("Attempt %d/%d failed for %s: %s",
+                               attempt, attempts, params.get("dateFrom"), _reason(exc))
+            if attempt < attempts:
+                time.sleep(min(pause * attempt, max(deadline - time.monotonic(), 0)))
     raise last_exc or TimeoutError("fetch budget exhausted")
 
 
-def _fetch_day(session: requests.Session, day: str, deadline: float) -> tuple[list, bool]:
+def _is_server_error(exc: Exception) -> bool:
+    return (isinstance(exc, requests.HTTPError) and exc.response is not None
+            and exc.response.status_code >= 500)
+
+
+class _SplitState:
+    """What splitting one day's failing pages has used so far."""
+
+    def __init__(self):
+        self.requests = 0
+        self.answered = 0  # requests the server answered with a page, even an empty one
+        self.skipped = 0
+
+
+def _fetch_block(session: requests.Session, day: str, page: int, size: int,
+                 deadline: float, state: _SplitState) -> list:
+    """The records of page `page` of size `size`, with bad records left out.
+
+    Page p of size S holds records (p-1)*S+1 to p*S, so pages 2p-1 and 2p of
+    size S/2 hold exactly its two halves. A failing block is split until the
+    record that fails is alone; that record is skipped. Raises the server
+    error when a limit is reached, so the day fails as it would have before."""
+    state.requests += 1
+    try:
+        got = _get_page(session, {"PageNumber": page, "PageSize": size,
+                                  "dateFrom": day, "dateTo": day},
+                        deadline, attempts=2 if size == 1 else 1, pause=0, quiet=True)
+        state.answered += 1
+        return got
+    except requests.HTTPError as exc:
+        if not _is_server_error(exc) or state.requests >= MAX_SPLIT_REQUESTS:
+            raise
+        if size == 1:
+            if state.skipped >= MAX_SKIPPED_PER_DAY:
+                raise
+            state.skipped += 1
+            logger.warning("%s: record %d cannot be served by the API; skipped", day, page)
+            return []
+        half = size // 2
+        return (_fetch_block(session, day, 2 * page - 1, half, deadline, state)
+                + _fetch_block(session, day, 2 * page, half, deadline, state))
+
+
+def _fetch_day(session: requests.Session, day: str,
+               deadline: float) -> tuple[list, bool, int]:
     """Page through one publication day until an empty page.
-    Returns (releases, complete); complete is False when MAX_PAGES cut it short."""
-    out = []
+    Returns (releases, complete, skipped); complete is False when MAX_PAGES cut
+    it short, and skipped counts records the API could not serve (ADR-0029)."""
+    out, state = [], _SplitState()
     for page in range(1, MAX_PAGES + 1):
-        releases = _get_page(session, {
-            "PageNumber": page,
-            "PageSize": PAGE_SIZE,
-            "dateFrom": day,
-            "dateTo": day,
-        }, deadline)
+        try:
+            releases = _get_page(session, {
+                "PageNumber": page,
+                "PageSize": PAGE_SIZE,
+                "dateFrom": day,
+                "dateTo": day,
+            }, deadline)
+        except requests.HTTPError as exc:
+            if not _is_server_error(exc):
+                raise
+            logger.warning("%s page %d keeps failing (%s); splitting it to find the bad record",
+                           day, page, _reason(exc))
+            half = PAGE_SIZE // 2
+            releases = (_fetch_block(session, day, 2 * page - 1, half, deadline, state)
+                        + _fetch_block(session, day, 2 * page, half, deadline, state))
+            if state.answered == 0:
+                raise  # the server answered nothing at all: it is down, not serving a bad record
         if not releases:
-            return out, True
+            return out, True, state.skipped
         out.extend(releases)
-    return out, False
+    return out, False, state.skipped
 
 
 def fetch_releases(date_from: dt.date, date_to: dt.date) -> tuple[list, list[DayResult]]:
@@ -213,16 +284,16 @@ def fetch_releases(date_from: dt.date, date_to: dt.date) -> tuple[list, list[Day
                 results.append(DayResult(day, False, "out of time"))
                 continue
             try:
-                day_releases, complete = _fetch_day(session, day.isoformat(), deadline)
+                day_releases, complete, skipped = _fetch_day(session, day.isoformat(), deadline)
             except (requests.RequestException, ValueError, TimeoutError, RecursionError) as exc:
                 logger.warning("Giving up on %s: %s", day, _reason(exc))
                 results.append(DayResult(day, False, _reason(exc)))
                 continue
             if complete:
-                results.append(DayResult(day, True, None))
+                results.append(DayResult(day, True, None, skipped))
             else:
                 logger.warning("%s hit the %d-page limit; it is kept but not complete", day, MAX_PAGES)
-                results.append(DayResult(day, False, "page limit"))
+                results.append(DayResult(day, False, "page limit", skipped))
             for rel in day_releases:
                 ocid = _ocid(rel)
                 if ocid is None:
@@ -516,4 +587,5 @@ def build_digest(releases: list, day_results: list[DayResult], memory: dict | No
         heartbeat=heartbeat,
         dropped_releases=dropped,
         ai_rejected=None if ai is None else _flag_and_sort(rejected, memory, status, run_at),
+        skipped_releases=sum(r.skipped for r in day_results if window[0] <= r.day <= window[1]),
     )
