@@ -1,6 +1,6 @@
 # eTenders digest — Azure Function
 
-Twice a day (08:00 and 20:00 SAST) this Azure Function fetches the last five days of South African government tenders from the eTenders OCDS API. An AI model decides which open tenders fit a data-engineering and BI profile, and keywords are only the fallback. It then emails a ranked HTML summary plus an xlsx. The running cost is about R1 a month.
+Twice a day, Monday to Friday (08:00 and 20:00 SAST; no run on weekends), this Azure Function fetches the last five days of South African government tenders from the eTenders OCDS API. An AI model decides which open tenders fit a data-engineering and BI profile, and keywords are only the fallback. It then emails a ranked HTML summary plus an xlsx. The running cost is about R1 a month.
 
 The eTenders API is unreliable. It is called one day at a time, newest first, under a time budget. It answers HTTP 500 when a page contains a record it cannot serve, so a failing page is split in halves until the bad record is alone and only that record is skipped (ADR-0029). The email footer says how many records were skipped. If a whole day cannot be fetched (the server is down, or a timeout), the email still goes out, marked **Partial digest** and naming the missing dates, and later runs try that day again.
 
@@ -33,7 +33,7 @@ The choice of model comes from a test on 144 hand-labelled tenders, using `tools
 
 | File | Purpose |
 |------|---------|
-| `function_app.py` | Timer trigger at 06:00 and 18:00 UTC. Runs the whole job: read memory, fetch, AI step, build, send the email, save memory, log one `RUN_SUMMARY` line. |
+| `function_app.py` | Timer trigger at 06:00 and 18:00 UTC, Monday to Friday. Runs the whole job: read memory, fetch, AI step, build, send the email, save memory, log one `RUN_SUMMARY` line. |
 | `pipeline.py` | Fetches day by day, validates fields, keeps the open tenders the AI approves (keywords as fallback), scores and orders them. |
 | `classify.py` | The AI step: Cloudflare Llama first, Azure nano as fallback, with the cost cap and time limit. |
 | `memory.py` | State between runs: tenders already sent, dates covered, AI verdicts. In Azure it's a blob reached with the managed identity; locally it's a JSON file. |

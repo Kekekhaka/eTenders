@@ -538,3 +538,31 @@ def test_save_and_load_round_trip_through_a_file(tmp_path):
     loaded, status, _ = memory.load(store, RUN_AT)
     assert status == "ok"
     assert loaded == original
+
+
+# --- Monday to Friday runs (ADR-0002) ------------------------------------------------
+
+@pytest.mark.real_tuning
+def test_runs_on_weekdays_only_never_name_a_weekend_day_as_missed():
+    """Three weeks of runs at 06:00 and 18:00 UTC, Monday to Friday, every fetch
+    completing. Saturday and Sunday are never run on; Monday's window reaches them."""
+    mem_state = None
+    start = dt.date(2026, 10, 5)  # a Monday
+    runs = 0
+    for offset in range(21):
+        day = start + dt.timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        for hour in (6, 18):
+            run_at = dt.datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+            window = pipeline.window_for(run_at)
+            results = [DayResult(window[1] - dt.timedelta(days=i), True, None)
+                       for i in range((window[1] - window[0]).days + 1)]
+            if mem_state is not None:
+                assert memory.missed_days(mem_state, window) == [], (run_at, window)
+            mem_state = memory.after_delivery(mem_state, FakeDigest(window=window), results, run_at)
+            runs += 1
+            if day.weekday() == 0 and hour == 6:  # Monday morning reaches back over the weekend
+                for back in (1, 2):
+                    assert mem_state["days"][day - dt.timedelta(days=back)] == "covered"
+    assert runs == 30

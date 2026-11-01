@@ -1,4 +1,4 @@
-"""The Azure Function: a timer that runs the eTenders digest twice a day.
+"""The Azure Function: a timer that runs the eTenders digest twice a day, Monday to Friday.
 
 run() is the whole run, written so tests can drive it with fakes:
 read the memory, fetch, build the digest, send it, save the memory (only
@@ -210,8 +210,9 @@ def run(run_at: dt.datetime, store, send_report, send_failure_notice, ping,
     return summary
 
 
-# 06:00 and 18:00 UTC = 08:00 and 20:00 SAST (UTC+2), twice daily.
-@app.timer_trigger(schedule="0 0 6,18 * * *", arg_name="timer", run_on_startup=False)
+# 06:00 and 18:00 UTC = 08:00 and 20:00 SAST (UTC+2), Monday to Friday (ADR-0002).
+# Monday's run still reaches the weekend: its window starts four days back.
+@app.timer_trigger(schedule="0 0 6,18 * * 1-5", arg_name="timer", run_on_startup=False)
 def etenders_digest(timer: func.TimerRequest, context: func.Context) -> None:
     run(
         dt.datetime.now(dt.timezone.utc),

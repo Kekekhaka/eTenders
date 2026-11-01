@@ -111,7 +111,7 @@ def test_the_function_app_registers_one_timer():
     functions = function_app.app.get_functions()
     assert [f.get_function_name() for f in functions] == ["etenders_digest"]
     trigger = functions[0].get_trigger()
-    assert trigger.schedule == "0 0 6,18 * * *"
+    assert trigger.schedule == "0 0 6,18 * * 1-5"  # 08:00 and 20:00 SAST, Monday to Friday
     assert trigger.run_on_startup is False
 
 

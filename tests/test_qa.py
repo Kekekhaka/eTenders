@@ -834,7 +834,7 @@ def test_ac37_the_timer_source_has_the_documented_schedule_and_no_run_on_startup
     """AC-37 is proven by test_function_app.py (it owns the one allowed get_functions() call);
     this is a static cross-check of the decorator text, so a schedule edit is caught twice."""
     src = (ROOT / "function_app.py").read_text(encoding="utf-8")
-    assert 'schedule="0 0 6,18 * * *"' in src and "run_on_startup=False" in src
+    assert 'schedule="0 0 6,18 * * 1-5"' in src and "run_on_startup=False" in src
     assert src.count("@app.timer_trigger") == 1
 
 
