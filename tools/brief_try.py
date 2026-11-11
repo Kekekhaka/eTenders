@@ -12,6 +12,7 @@ Prints the brief and what was sent, never the token. Not deployed.
 """
 import datetime as dt
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,9 @@ import pipeline  # noqa: E402
 
 
 def main(key: str, days_back: int) -> None:
+    if not (os.environ.get("CF_ACCOUNT_ID", "").strip() and os.environ.get("CF_API_TOKEN", "").strip()):
+        sys.exit("Set CF_ACCOUNT_ID and CF_API_TOKEN in this terminal first, for example:\n"
+                 '  $env:CF_ACCOUNT_ID = "your-account-id"\n  $env:CF_API_TOKEN = "your-token"')
     logging.disable(logging.WARNING)
     today = dt.date.today()
     releases, _ = pipeline.fetch_releases(today - dt.timedelta(days=days_back), today)
