@@ -33,17 +33,27 @@ The choice of model comes from a test on 144 hand-labelled tenders, using `tools
 ## Briefs from the tender documents (`documents.py`, ADR-0030)
 
 Off until `BRIEFS_ENABLED=true`. For each **new** tender the AI approved (at most 6 a run), the run
-downloads its documents from the eTenders portal, finds the scope of work, and asks Llama (then nano)
-for a six-line brief: Scope, Deliverables, Duration, Requirements, Briefing, Evaluation. It appears
-under the title in the email and in the xlsx `brief` column.
+reads all its documents from the eTenders portal (up to 8 files) and writes a brief in three parts,
+under the title in the email and in the xlsx `brief` column:
+
+1. **Summary** (one AI call on the cover page and the scope of work): Scope, Deliverables, Duration,
+   Briefing.
+2. **Must submit and Evaluation** (a second AI call on every page about requirements and
+   evaluation, from all the files): every mandatory item and returnable, one per line, numbers
+   copied exactly; then the evaluation stage by stage.
+3. **Found in the documents**: key items found by plain pattern matching, not by the AI (reference
+   letters and how many, compulsory briefing, functionality threshold, 80/20 or 90/10, CSD, tax,
+   B-BBEE, SBD forms and more), so an item the AI leaves out still shows.
 
 - **What it reads:** PDF and Word files. Scanned PDFs and `.zip` folders are not read (about 4 in 19
   tenders in the November 2026 survey); those tenders get no brief.
-- **Cost:** about 250 neurons a brief on the free Cloudflare plan; nano fallback about R0.008 a brief,
-  capped at R0.10 a run.
-- **Safety:** only https links on `www.etenders.gov.za`, size-capped, never saved to disk; the document
-  text is passed to the model as untrusted data, and the brief is escaped in the email.
-- **Check it:** the brief can miss or misread details. Compare the first few with the documents.
+- **Cost:** up to about 870 neurons a brief on the free Cloudflare plan; nano fallback about R0.04 a
+  brief, capped at R0.10 a run.
+- **Safety:** only https links on `www.etenders.gov.za`, size-capped, never saved to disk; the
+  document text is passed to the model as untrusted data, and the brief is escaped in the email.
+- **Check it:** `python tools/brief_try.py <tender number> [days back]` makes a brief for one tender
+  from your laptop (needs `CF_ACCOUNT_ID` and `CF_API_TOKEN`). The brief can still miss or misread
+  details: read the documents before you bid.
 
 ## Files
 

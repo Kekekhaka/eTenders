@@ -1,4 +1,4 @@
-"""Tests for documents.py: finding the scope of work in a tender's files.
+"""Tests for documents.py: the texts a tender brief is written from.
 The PDFs and Word files are built in memory; nothing leaves this machine."""
 
 import io
@@ -80,28 +80,75 @@ def later(seconds=60):
     return time.monotonic() + seconds
 
 
-def test_the_text_starts_at_the_scope_of_work():
-    pdf = make_pdf([f"Invitation to bid {FILLER}", f"Conditions {FILLER}",
-                    f"Terms of reference: build a data warehouse {FILLER}"])
-    text, status = documents.scope_text([doc("rfq.pdf")], later(), Http({BASE + "rfq.pdf": pdf}))
+TCTA_LIKE = make_pdf([
+    f"Cover page DURATION: to be completed within 3 Months from appointment {FILLER}",
+    f"Background of the organisation {FILLER}",
+    f"Terms of reference: train 6 candidates on Sage Enterprise Intelligence {FILLER}",
+    f"Returnables MANDATORY: SBD 1, SBD 4 and SBD 6.1; CSD Registration Report; three (3) reference letters {FILLER}",
+    f"Functionality: minimum threshold of 70% to proceed. The applicable preference point system for this tender "
+    f"is the 80/20 system. The 90/10 system applies above R50 million {FILLER}",
+])
+
+
+def test_the_summary_is_the_cover_page_then_the_scope_of_work():
+    texts, status = documents.tender_text([doc("rfq.pdf")], later(), Http({BASE + "rfq.pdf": TCTA_LIKE}))
     assert status == "ok"
-    assert text.startswith("Terms of reference: build a data warehouse")
-    assert "Invitation" not in text
+    assert texts["summary"].startswith("Cover page DURATION: to be completed within 3 Months")
+    assert "Terms of reference: train 6 candidates" in texts["summary"]
+    assert "Background of the organisation" not in texts["summary"]
 
 
-def test_a_file_titled_scope_is_tried_first_and_the_rest_are_not_downloaded():
-    files = {BASE + "forms.pdf": make_pdf([f"SBD 4 declaration {FILLER}"]),
-             BASE + "scope.pdf": make_pdf([f"Scope of work: Power BI dashboards {FILLER}"])}
+def test_the_requirements_text_holds_every_requirement_page_and_the_cover():
+    texts, _ = documents.tender_text([doc("rfq.pdf")], later(), Http({BASE + "rfq.pdf": TCTA_LIKE}))
+    req = texts["requirements"]
+    assert req.startswith("Cover page") and "three (3) reference letters" in req and "minimum threshold of 70%" in req
+    assert "Background of the organisation" not in req  # no requirement on that page
+
+
+def test_the_checklist_is_found_by_patterns_not_by_the_model():
+    texts, _ = documents.tender_text([doc("rfq.pdf")], later(), Http({BASE + "rfq.pdf": TCTA_LIKE}))
+    assert texts["checklist"] == ["3 reference letters", "functionality threshold 70%", "80/20 preference points",
+                                  "CSD registration", "SBD 1, 4, 6.1"]
+
+
+def test_requirements_in_another_file_are_read_too():
+    files = {BASE + "scope.pdf": make_pdf([f"Scope of work: Power BI dashboards {FILLER}"]),
+             BASE + "returnables.pdf": make_pdf([f"Returnable schedule: two reference letters, CSD report {FILLER}"])}
     http = Http(files)
-    text, status = documents.scope_text([doc("forms.pdf", "SBD forms"), doc("scope.pdf", "Part B Scope of work")],
-                                        later(), http)
-    assert status == "ok" and "Power BI" in text
-    assert http.got == [BASE + "scope.pdf"]
+    texts, status = documents.tender_text(
+        [doc("returnables.pdf", "Returnable schedules"), doc("scope.pdf", "Part B Scope of work")], later(), http)
+    assert status == "ok" and http.got == [BASE + "scope.pdf", BASE + "returnables.pdf"]  # scope file first
+    assert "Power BI" in texts["summary"] and "two reference letters" in texts["requirements"]
+    assert "2 reference letters" in texts["checklist"]
+
+
+def test_when_requirement_pages_do_not_fit_the_strongest_are_kept_in_order(monkeypatch):
+    weak = f"Some experience is welcome {FILLER}"                                     # 1 marker
+    strong = f"MANDATORY returnable: CSD, B-BBEE, SBD 4, reference letters {FILLER}"  # many markers
+    pdf = make_pdf([f"Cover {FILLER}", weak, strong, weak])
+    monkeypatch.setattr(documents, "REQUIREMENT_WORDS", 160)  # cover plus one page
+    texts, _ = documents.tender_text([doc("rfq.pdf")], later(), Http({BASE + "rfq.pdf": pdf}))
+    assert "MANDATORY returnable" in texts["requirements"] and "Some experience" not in texts["requirements"]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("submit one (1) reference letter", "1 reference letter"),
+    ("Provide 4 contactable client references", "4 reference letters"),
+    ("letters of reference are required", "reference letters"),
+    ("a compulsory briefing session will be held", "a compulsory briefing or site meeting is mentioned"),
+    ("a non-compulsory briefing session", None),
+    ("the 80/20 system for requirements up to R50 million; the 90/10 system above it",
+     "80/20 or 90/10 preference points (the form lists both: check which applies)"),
+    ("The applicable preference point system for this tender is the 90/10 preference point system", "90/10 preference points"),
+])
+def test_checklist_items(text, expected):
+    found = documents.checklist(text)
+    assert (expected in found) if expected else not any("briefing" in f for f in found)
 
 
 def test_help_guides_are_never_downloaded():
     http = Http({BASE + "guide.pdf": make_pdf([f"Scope of work {FILLER}"])})
-    _, status = documents.scope_text([doc("guide.pdf", "SAP Ariba Sourcing User Guide")], later(), http)
+    _, status = documents.tender_text([doc("guide.pdf", "SAP Ariba Sourcing User Guide")], later(), http)
     assert http.got == [] and status == "unreadable"
 
 
@@ -114,63 +161,62 @@ def test_help_guides_are_never_downloaded():
 ])
 def test_only_https_links_on_the_etenders_portal_are_fetched(url):
     http = Http({url: make_pdf([f"Scope of work {FILLER}"])})
-    documents.scope_text([{"title": "Scope", "url": url}], later(), http)
+    documents.tender_text([{"title": "Scope", "url": url}], later(), http)
     assert http.got == []
 
 
 def test_a_file_over_the_size_cap_is_not_read(monkeypatch):
     monkeypatch.setattr(documents, "MAX_BYTES", 1000)
     http = Http({BASE + "big.pdf": make_pdf([f"Scope of work {FILLER}" * 20])})
-    _, status = documents.scope_text([doc("big.pdf")], later(), http)
-    assert status == "unreadable"
+    assert documents.tender_text([doc("big.pdf")], later(), http) == (None, "unreadable")
 
 
 def test_a_scanned_pdf_is_reported_as_scanned():
     http = Http({BASE + "scan.pdf": make_pdf(["", ""])})
-    assert documents.scope_text([doc("scan.pdf")], later(), http) == (None, "scanned")
+    assert documents.tender_text([doc("scan.pdf")], later(), http) == (None, "scanned")
 
 
 def test_a_word_file_is_read():
     http = Http({BASE + "tor.docx": make_docx(f"Terms of reference: data governance {FILLER}")})
-    text, status = documents.scope_text([doc("tor.docx")], later(), http)
-    assert status == "ok" and text.startswith("Terms of reference: data governance")
+    texts, status = documents.tender_text([doc("tor.docx")], later(), http)
+    assert status == "ok" and texts["summary"].startswith("Terms of reference: data governance")
 
 
 def test_a_word_file_that_unpacks_too_big_is_not_read(monkeypatch):
     monkeypatch.setattr(documents, "MAX_BYTES", 100_000)
     http = Http({BASE + "bomb.docx": make_docx(f"Scope of work {FILLER}", size=500_000)})
     assert len(http.files[BASE + "bomb.docx"]) < 100_000  # small to download
-    assert documents.scope_text([doc("bomb.docx")], later(), http) == (None, "unreadable")
+    assert documents.tender_text([doc("bomb.docx")], later(), http) == (None, "unreadable")
 
 
 @pytest.mark.parametrize("body", [b"<html>Access denied</html>", b"%PDF-1.4 broken", b"PK\x03\x04 broken"])
 def test_a_broken_or_wrong_file_is_skipped_never_raised(body):
-    assert documents.scope_text([doc("x")], later(), Http({BASE + "x": body})) == (None, "unreadable")
+    assert documents.tender_text([doc("x")], later(), Http({BASE + "x": body})) == (None, "unreadable")
 
 
 def test_without_a_scope_heading_the_start_of_the_file_is_used():
     http = Http({BASE + "rfq.pdf": make_pdf([f"Supply of software licences {FILLER}"])})
-    text, status = documents.scope_text([doc("rfq.pdf")], later(), http)
-    assert status == "no_scope" and text.startswith("Supply of software licences")
+    texts, status = documents.tender_text([doc("rfq.pdf")], later(), http)
+    assert status == "no_scope" and texts["summary"].startswith("Supply of software licences")
 
 
-def test_the_text_is_cut_to_max_words(monkeypatch):
-    monkeypatch.setattr(documents, "MAX_WORDS", 70)
+def test_the_summary_is_cut_to_its_word_limit(monkeypatch):
+    monkeypatch.setattr(documents, "SUMMARY_WORDS", 70)
     http = Http({BASE + "rfq.pdf": make_pdf([f"Scope of work {FILLER}", f"More {FILLER}"])})
-    text, _ = documents.scope_text([doc("rfq.pdf")], later(), http)
-    assert len(text.split()) == 70
+    texts, _ = documents.tender_text([doc("rfq.pdf")], later(), http)
+    assert len(texts["summary"].split()) == 70
 
 
 def test_nothing_is_downloaded_after_the_deadline():
     http = Http({BASE + "rfq.pdf": make_pdf([f"Scope of work {FILLER}"])})
-    assert documents.scope_text([doc("rfq.pdf")], time.monotonic() - 1, http) == (None, "out_of_time")
+    assert documents.tender_text([doc("rfq.pdf")], time.monotonic() - 1, http) == (None, "out_of_time")
     assert http.got == []
 
 
 def test_a_failed_download_is_skipped():
     http = Http({BASE + "rfq.pdf": make_pdf([f"Scope of work {FILLER}"])}, status=404)
-    assert documents.scope_text([doc("rfq.pdf")], later(), http) == (None, "unreadable")
+    assert documents.tender_text([doc("rfq.pdf")], later(), http) == (None, "unreadable")
 
 
 def test_a_tender_without_documents():
-    assert documents.scope_text([], later(), Http({})) == (None, "no_documents")
+    assert documents.tender_text([], later(), Http({})) == (None, "no_documents")

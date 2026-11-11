@@ -142,7 +142,7 @@ def _briefs(releases: list, verdicts: dict | None, mem: dict | None, run_at: dt.
     approved_new = [o for o, v in verdicts.items() if v["v"] and o not in sent]
     items = pipeline.tender_documents(releases, run_at, approved_new)[:MAX_BRIEFS_PER_RUN]
     made, stats = classify.briefs(
-        items, lambda item, deadline: documents.scope_text(item["docs"], deadline),
+        items, lambda item, deadline: documents.tender_text(item["docs"], deadline),
         deadline=started + BRIEF_DEADLINE_S)
     summary["briefs"] = stats
     return made

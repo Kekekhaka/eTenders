@@ -171,6 +171,15 @@ def _banners(d: Digest) -> list[str]:
     return out
 
 
+def _brief_line(line: str) -> str:
+    """One brief line as HTML: "- x" becomes a bullet, "Heading:" is bold."""
+    if line.startswith("- "):
+        return "&bull; " + _e(line[2:])
+    if line.endswith(":"):
+        return f"<strong>{_e(line)}</strong>"
+    return _e(line)
+
+
 def _row(r, run_year: int) -> str:
     soon = bool(r.closing_soon)
     flags = []
@@ -207,7 +216,7 @@ def _row(r, run_year: int) -> str:
     if notes:
         title += f"<br><span{_SMALL}>{' · '.join(notes)}</span>"
     if isinstance(r.brief, str) and r.brief.strip():
-        lines = "<br>".join(_e(line) for line in r.brief.splitlines() if line.strip())
+        lines = "<br>".join(_brief_line(line) for line in r.brief.splitlines() if line.strip())
         title += (f'<br><span style="color:{_INK};font-size:{_SIZE_SMALL};line-height:1.4;">'
                   f"<strong>Brief</strong><br>{lines}</span>")
 

@@ -59,3 +59,32 @@ method, which are in the tender documents.
 - **`.zip` folders** (1 of 19).
 - **Quality:** the brief has not been checked against a human reading of the same documents. The
   operator should compare the first few briefs with the documents.
+
+## Update 2026-11-11: complete requirements, after the first real check
+The operator checked the first brief (TCTA, 132/2026/EWSS/TRAINING/RFQ) against the documents:
+scope, deliverables, briefing and evaluation were right, but the requirements were too narrow (the
+reference letters and other returnables were missing), and the duration (on the cover page only)
+was not in the text sent. The operator's rule: **never miss or narrow a requirement; the evaluation
+matters as much.** So:
+- **Every readable file is read** (up to 8), not only the first one with a scope.
+- **Two texts, two calls.** The summary call (Scope, Deliverables, Duration, Briefing) gets the cover
+  page and the pages from the scope on (up to 5,000 words). The requirements call gets the cover
+  page and the pages that say most about requirements and evaluation, from all files (up to 12,000
+  words), and must list **every** mandatory item and returnable one per line, copy numbers exactly,
+  and give the evaluation stage by stage (compliance, functionality criteria with weights and
+  threshold, price and preference).
+- **A checklist that does not depend on the model**: plain pattern matching adds "Found in the
+  documents: ..." (reference letters and how many, compulsory briefing, functionality threshold,
+  80/20 or 90/10 as the tender states it, CSD, tax, B-BBEE, SBD form numbers, accreditation, CIDB,
+  good standing, audited financial statements). If the model leaves an item out, this line still
+  shows it. It says what the documents mention, not whether it applies.
+- **If a call fails**, the brief says "not available (the AI did not answer): read the documents"
+  instead of leaving the section out.
+
+**Cost per brief** (Llama, worst case): about 240 neurons for the summary and 630 for the
+requirements, about 870 in all (the TCTA tender: about 560). Two a day is about 1,700 neurons; six
+in a run about 5,200, plus about 1,500 for classifying: within the free 10,000. The nano fallback is
+about R0.04 a brief, still capped at R0.10 a run.
+
+**Still not covered**: scanned PDFs and `.zip` folders. No method makes a summary certain; the
+email says to check the documents before bidding.
