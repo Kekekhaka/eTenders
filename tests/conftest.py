@@ -28,6 +28,9 @@ AI_SETTINGS = ("LLM_ENABLED", "CF_ACCOUNT_ID", "CF_API_TOKEN",
 def _no_ai_settings(monkeypatch):
     for name in AI_SETTINGS:
         monkeypatch.delenv(name, raising=False)
+    # Fake Cloudflare answers at once; tests about call spacing set their own interval.
+    import classify
+    monkeypatch.setattr(classify, "CF_MIN_INTERVAL_S", 0)
 
 
 @pytest.fixture(autouse=True)

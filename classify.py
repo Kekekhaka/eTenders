@@ -36,9 +36,14 @@ NANO_CAP_ZAR = 0.20        # most nano may cost in one run (a few calls may over
 # Azure Retail Prices, gpt-5-nano Global, southafricanorth, October 2026.
 NANO_ZAR_PER_M_IN, NANO_ZAR_PER_M_OUT = 0.80, 6.40
 BUDGET_S = 240             # no new call starts after this; one run a day judges a whole day's tenders
-# The longest one tender can take: Cloudflare CF_ATTEMPTS times, then nano twice plus a 429 wait.
-MAX_CALL_S = CF_ATTEMPTS * 20 + 2 * 20 + 5   # 20 is CALL_TIMEOUT_S
-WORKERS = 4                # parallel calls, kept low for Cloudflare's rate limit
+WORKERS = 8                # parallel calls: a Cloudflare call took about 6 s in November 2026
+# Cloudflare allows 300 requests a minute for text models on the free plan
+# (Workers AI limits page, 2026-10-09). Starting calls at least this far apart
+# keeps us at 240 a minute however fast the calls come back.
+CF_MIN_INTERVAL_S = 0.25
+# The longest one tender can take: Cloudflare CF_ATTEMPTS times (each may first wait its
+# turn, at most WORKERS * CF_MIN_INTERVAL_S), then nano twice plus a 429 wait.
+MAX_CALL_S = CF_ATTEMPTS * (20 + 2) + 2 * 20 + 5   # 20 is CALL_TIMEOUT_S, 2 is 8 * 0.25
 CALL_TIMEOUT_S = 20
 DESCRIPTION_CHARS = 600
 
@@ -93,6 +98,7 @@ class _Run:
         self.cf_failures = 0   # calls that failed, for RUN_SUMMARY
         self.cf_streak = 0     # failed calls in a row
         self.cf_off = None if self.cf_account and self.cf_token else "not_configured"
+        self._cf_next_start = 0.0  # monotonic time the next Cloudflare call may start
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
         deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5-nano").strip()
         self.nano_url = (f"{endpoint}/openai/deployments/{deployment}/chat/completions"
@@ -119,6 +125,19 @@ class _Run:
                     logger.warning("Cloudflare is off for the rest of this run: %s", reason)
                 self.cf_off = reason
 
+    def _cf_turn(self, deadline: float | None) -> bool:
+        """Wait for this call's start slot (CF_MIN_INTERVAL_S apart across all
+        threads). False when the slot would fall too close to `deadline`."""
+        with self.lock:
+            now = time.monotonic()
+            start = max(now, self._cf_next_start)
+            if deadline is not None and start > deadline - 1:
+                return False
+            self._cf_next_start = start + CF_MIN_INTERVAL_S
+        if start > now:
+            time.sleep(start - now)
+        return True
+
     def cf_text(self, prompt: str, max_tokens: int, timeout: float,
                 deadline: float | None = None) -> str | None:
         """Cloudflare's reply text, or None. A call never runs past `deadline`."""
@@ -127,9 +146,11 @@ class _Run:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.cf_account}/ai/run/{CF_MODEL}"
         reason = "unknown"
         for attempt in range(CF_ATTEMPTS):
+            if not self._cf_turn(deadline):
+                return None  # out of time: not Cloudflare's fault, so not a failure
             wait = _within(timeout, deadline)
             if wait is None:
-                return None  # out of time: not Cloudflare's fault, so not a failure
+                return None
             try:
                 r = self.http.post(url, headers={"Authorization": f"Bearer {self.cf_token}"},
                                    json={"messages": [{"role": "user", "content": prompt}],

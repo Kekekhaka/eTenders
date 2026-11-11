@@ -6,6 +6,8 @@ import datetime as dt
 import io
 import itertools
 import json
+import pathlib
+import re
 import threading
 import time
 
@@ -604,3 +606,56 @@ def test_briefs_are_off_unless_switched_on(tmp_path, monkeypatch):
     summary = function_app.run(RUN_AT, memory.FileStore(str(tmp_path / "m.json")),
                                mailer.send_report, mailer.send_failure_notice, lambda u, b: "ok")
     assert summary["briefs"] == "off"
+
+
+# --- Cloudflare call spacing: more calls at once, never over the rate limit ------------
+
+class Stamped(Http):
+    """Records when each Cloudflare call starts; each takes `slow` seconds to answer."""
+
+    def __init__(self, slow=0.0, **kw):
+        super().__init__(**kw)
+        self.slow, self.stamps = slow, []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        if "api.cloudflare.com" in url:
+            with self.lock:
+                self.stamps.append(time.monotonic())
+            time.sleep(self.slow)
+        return super().post(url, headers, json, timeout)
+
+
+def test_cloudflare_calls_start_at_least_the_interval_apart_even_with_many_workers(both, monkeypatch):
+    monkeypatch.setattr(classify, "CF_MIN_INTERVAL_S", 0.05)
+    http = Stamped(slow=0.0)  # instant answers: only the spacing holds the rate down
+    verdicts, _ = run_classify(http, [tender(str(i)) for i in range(12)])
+    assert len(verdicts) == 12
+    gaps = [b - a for a, b in zip(sorted(http.stamps), sorted(http.stamps)[1:])]
+    assert min(gaps) >= 0.045  # a little slack for the clock
+
+
+def test_slow_calls_overlap_so_more_get_done(both, monkeypatch):
+    monkeypatch.setattr(classify, "CF_MIN_INTERVAL_S", 0.01)
+    http = Stamped(slow=0.3)
+    begin = time.monotonic()
+    verdicts, _ = run_classify(http, [tender(str(i)) for i in range(classify.WORKERS)])
+    assert len(verdicts) == classify.WORKERS
+    assert time.monotonic() - begin < 0.3 * classify.WORKERS / 2  # they ran side by side
+
+
+def test_the_configured_rate_stays_under_cloudflares_limit():
+    # Cloudflare's free plan: 300 requests a minute for text models (limits page, 2026-10-09).
+    # Read from the source, because the test setup sets the interval to 0.
+    src = pathlib.Path(classify.__file__).read_text(encoding="utf-8")
+    interval = float(re.search(r"^CF_MIN_INTERVAL_S = ([\d.]+)", src, re.MULTILINE).group(1))
+    assert interval > 0 and 60 / interval <= 300
+
+
+def test_waiting_for_a_slot_never_runs_past_a_brief_deadline(both, monkeypatch):
+    monkeypatch.setattr(classify, "CF_MIN_INTERVAL_S", 10)  # the second call's slot is 10 s away
+    http = Http(cloudflare=lambda body: cf_reply("Scope: x"))
+    items = [brief_item("a"), brief_item("b")]
+    begin = time.monotonic()
+    made, _ = classify.briefs(items, text_of(), time.monotonic() + 3, http=http,
+                              get_token=lambda: (None, "no_identity"))  # nano off: Cloudflare only
+    assert len(made) == 1 and time.monotonic() - begin < 3  # the other's slot was too late, so it gave up
