@@ -27,14 +27,16 @@ from digest import is_safe_url
 logger = logging.getLogger(__name__)
 
 CF_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-CF_MAX_FAILURES = 3        # after this many failed Cloudflare calls, use nano for the rest
+CF_MAX_FAILURES = 3        # after this many failed Cloudflare calls in a row, use nano for the rest
+CF_ATTEMPTS = 2            # a timeout, connection error or HTTP 5xx is tried once more before it counts
 NANO_API_VERSION = "2025-04-01-preview"
 NANO_RESOURCE = "https://cognitiveservices.azure.com"
 NANO_CAP_ZAR = 0.20        # most nano may cost in one run (a few calls may overshoot by < R0.01)
 # Azure Retail Prices, gpt-5-nano Global, southafricanorth, October 2026.
 NANO_ZAR_PER_M_IN, NANO_ZAR_PER_M_OUT = 0.80, 6.40
 BUDGET_S = 240             # no new call starts after this; one run a day judges a whole day's tenders
-MAX_CALL_S = 2 * 20 + 5    # longest one tender can take: nano twice (CALL_TIMEOUT_S each) plus a 429 wait
+# The longest one tender can take: Cloudflare CF_ATTEMPTS times, then nano twice plus a 429 wait.
+MAX_CALL_S = CF_ATTEMPTS * 20 + 2 * 20 + 5   # 20 is CALL_TIMEOUT_S
 WORKERS = 4                # parallel calls, kept low for Cloudflare's rate limit
 CALL_TIMEOUT_S = 20
 DESCRIPTION_CHARS = 600
@@ -78,7 +80,8 @@ class _Run:
         self.lock = threading.Lock()
         self.cf_account = os.environ.get("CF_ACCOUNT_ID", "").strip()
         self.cf_token = os.environ.get("CF_API_TOKEN", "").strip()
-        self.cf_failures = 0
+        self.cf_failures = 0   # calls that failed, for RUN_SUMMARY
+        self.cf_streak = 0     # failed calls in a row
         self.cf_off = None if self.cf_account and self.cf_token else "not_configured"
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
         deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5-nano").strip()
@@ -92,11 +95,16 @@ class _Run:
         self.counts = {"llama": 0, "nano": 0}
 
     # --- Cloudflare ----------------------------------------------------------
+    def _cf_succeeded(self) -> None:
+        with self.lock:
+            self.cf_streak = 0  # only failures in a row switch Cloudflare off
+
     def _cf_failed(self, reason: str) -> None:
         with self.lock:
             self.cf_failures += 1
+            self.cf_streak += 1
             # 401/403: bad token; 429: allowance or rate limit. No point retrying.
-            if self.cf_failures >= CF_MAX_FAILURES or reason in ("http_401", "http_403", "http_429"):
+            if self.cf_streak >= CF_MAX_FAILURES or reason in ("http_401", "http_403", "http_429"):
                 if self.cf_off is None:
                     logger.warning("Cloudflare is off for the rest of this run: %s", reason)
                 self.cf_off = reason
@@ -105,20 +113,26 @@ class _Run:
         if self.cf_off:
             return None
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.cf_account}/ai/run/{CF_MODEL}"
-        try:
-            r = self.http.post(url, headers={"Authorization": f"Bearer {self.cf_token}"},
-                               json={"messages": [{"role": "user", "content": prompt}],
-                                     "max_tokens": 5},
-                               timeout=CALL_TIMEOUT_S)
-            if r.status_code != 200:
-                self._cf_failed(f"http_{r.status_code}")
-                return None
-            body = r.json()
-            text = body["result"]["response"]
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            self._cf_failed(type(exc).__name__)
-            return None
-        return _answer(text)
+        reason = "unknown"
+        for attempt in range(CF_ATTEMPTS):
+            try:
+                r = self.http.post(url, headers={"Authorization": f"Bearer {self.cf_token}"},
+                                   json={"messages": [{"role": "user", "content": prompt}],
+                                         "max_tokens": 5},
+                                   timeout=CALL_TIMEOUT_S)
+                if r.status_code == 200:
+                    text = r.json()["result"]["response"]
+                    self._cf_succeeded()
+                    return _answer(text)
+                reason = f"http_{r.status_code}"
+                if r.status_code < 500:
+                    break  # a 4xx will not change on a second try
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                reason = type(exc).__name__
+            if self.cf_off:
+                return None  # another tender already switched Cloudflare off
+        self._cf_failed(reason)
+        return None
 
     # --- Azure gpt-5-nano ----------------------------------------------------
     def _token(self) -> str | None:

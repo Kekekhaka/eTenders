@@ -4,6 +4,7 @@ identity are fakes; nothing leaves this machine."""
 
 import datetime as dt
 import io
+import itertools
 import json
 import threading
 
@@ -423,3 +424,52 @@ def test_the_email_says_how_many_records_could_not_be_read():
 def test_run_summary_lists_skipped_records_per_day():
     assert function_app._day_summary(day(1, skipped=2)) == {"day": "2026-10-01", "ok": True, "skipped": 2}
     assert function_app._day_summary(day(1)) == {"day": "2026-10-01", "ok": True}
+
+
+# --- Cloudflare: retry once, switch off only after failures in a row ----------------
+
+def seq(*items):
+    """A fake Cloudflare that answers with these items in order."""
+    it = iter(items)
+    return lambda body: next(it)
+
+
+def test_a_timeout_is_tried_again_before_it_counts_as_a_failure(both, monkeypatch):
+    monkeypatch.setattr(classify, "WORKERS", 1)
+    http = Http(cloudflare=seq(requests.ReadTimeout("slow"), cf_reply("YES")))
+    verdicts, stats = run_classify(http, [tender("a")])
+    assert verdicts == {"a": {"v": True, "by": "llama"}}
+    assert http.count("cloudflare") == 2 and stats["cf_failures"] == 0 and stats["nano"] == 0
+
+
+def test_a_server_error_is_tried_again_but_a_client_error_is_not(both, monkeypatch):
+    monkeypatch.setattr(classify, "WORKERS", 1)
+    http = Http(cloudflare=seq(Reply(502, {}), cf_reply("NO")))
+    verdicts, _ = run_classify(http, [tender("a")])
+    assert verdicts == {"a": {"v": False, "by": "llama"}} and http.count("cloudflare") == 2
+
+    http = Http(cloudflare=lambda body: Reply(400, {}), nano=lambda body: nano_reply("YES"))
+    verdicts, stats = run_classify(http, [tender("a")])
+    assert http.count("cloudflare") == 1  # a 400 will not change on a second try
+    assert verdicts == {"a": {"v": True, "by": "nano"}} and stats["cf_off"] is None
+
+
+def test_failures_that_are_not_in_a_row_never_switch_cloudflare_off(both, monkeypatch):
+    # The old rule counted every failure in the run: three scattered timeouts and
+    # Cloudflare was off for the day, leaving the rest unjudged or on nano.
+    monkeypatch.setattr(classify, "WORKERS", 1)
+    http = Http(cloudflare=lambda body, it=itertools.cycle(
+        [requests.ReadTimeout("slow"), requests.ReadTimeout("slow"), cf_reply("YES")]): next(it))
+    verdicts, stats = run_classify(http, [tender(str(i)) for i in range(12)])
+    assert len(verdicts) == 12
+    assert stats["cf_off"] is None and stats["llama"] == 6 and stats["nano"] == 6
+    assert stats["cf_failures"] == 6
+
+
+def test_a_success_resets_the_run_of_failures(both, monkeypatch):
+    monkeypatch.setattr(classify, "WORKERS", 1)
+    slow = requests.ReadTimeout("slow")
+    # two tenders fail (4 attempts), one succeeds, two fail again: never 3 in a row
+    http = Http(cloudflare=seq(slow, slow, slow, slow, cf_reply("YES"), slow, slow, slow, slow, cf_reply("YES")))
+    verdicts, stats = run_classify(http, [tender(str(i)) for i in range(5)])
+    assert stats["cf_off"] is None and len(verdicts) == 5

@@ -22,9 +22,10 @@ Keyword score (`KEYWORDS` in `pipeline.py`) still orders the list. The consultin
 
 - **Primary:** Llama 3.3 70B on Cloudflare Workers AI, **free plan**. The plan allows 10,000 neurons a day, and each tender uses about 7.
 - **Fallback:** gpt-5-nano on Azure OpenAI (`etenders-ai`), reached with the Function's managed identity, so no key is stored. It is capped at **R0.20 per run**. It is used only when Cloudflare fails or the daily allowance runs out.
+- **Cloudflare retries:** a timeout, connection error or HTTP 5xx is tried once more. Cloudflare is switched off for the rest of the run after 3 failed tenders **in a row**, or at once on a 401, 403 or 429.
 - **If neither answers:** the tender falls back to its keyword result and is retried on the next run.
 - **Verdicts are remembered** in the run memory for 14 days, so each tender is judged once.
-- **Time limit:** at most 240 s per run, and no AI call starts later than 400 s into the run, so the email and the memory write still fit in the Function's 10-minute timeout. Tenders not judged in time are judged on the next run.
+- **Time limit:** at most 240 s per run, and no AI call starts later than 350 s into the run, so the email and the memory write still fit in the Function's 10-minute timeout. Tenders not judged in time are judged on the next run.
 - **Off switch:** set `LLM_ENABLED` to anything other than `true`. No deploy is needed.
 
 The choice of model comes from a test on 144 hand-labelled tenders, using `tools/phase2_compare.py`. Llama 70B found 4 of 4 relevant tenders, Llama 8B and nano found 3 of 4 each (nano with the most false alarms), and the keywords found 1.

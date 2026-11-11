@@ -36,7 +36,7 @@ HEARTBEAT_PREFIX = "https://hc-ping.com/"
 HEARTBEAT_TIMEOUT_S = 5
 REASON_CHARS = 60        # a day's reason in RUN_SUMMARY is cut to this length
 MISSED_NAMED_CAP = 10    # at most this many missed days are listed in RUN_SUMMARY
-AI_LAST_START_S = 400    # no AI call starts later than this into the run (timeout is 600 s);
+AI_LAST_START_S = 350    # no AI call starts later than this into the run (timeout is 600 s);
                          # test_the_run_fits_the_function_timeout_in_the_worst_case checks the sum
 
 app = func.FunctionApp()
