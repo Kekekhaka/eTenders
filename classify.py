@@ -33,7 +33,8 @@ NANO_RESOURCE = "https://cognitiveservices.azure.com"
 NANO_CAP_ZAR = 0.20        # most nano may cost in one run (a few calls may overshoot by < R0.01)
 # Azure Retail Prices, gpt-5-nano Global, southafricanorth, October 2026.
 NANO_ZAR_PER_M_IN, NANO_ZAR_PER_M_OUT = 0.80, 6.40
-BUDGET_S = 90              # no new call starts after this; fetching already used up to 420 s
+BUDGET_S = 240             # no new call starts after this; one run a day judges a whole day's tenders
+MAX_CALL_S = 2 * 20 + 5    # longest one tender can take: nano twice (CALL_TIMEOUT_S each) plus a 429 wait
 WORKERS = 4                # parallel calls, kept low for Cloudflare's rate limit
 CALL_TIMEOUT_S = 20
 DESCRIPTION_CHARS = 600

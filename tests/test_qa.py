@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 import requests
 
+import classify
 import digest
 import email_sender
 import function_app
@@ -808,6 +809,11 @@ def test_the_run_fits_the_function_timeout_in_the_worst_case():
               + email_sender.NOTICE_TIMEOUT_S + function_app.HEARTBEAT_TIMEOUT_S)
     worst = max(delivered, failed)
     assert worst < limit - 30, (worst, limit)      # leaves 30 s for scoring and rendering
+    # The AI step is the one part with its own clock: its last call starts at AI_LAST_START_S,
+    # then the email goes out and the memory is written.
+    after_ai = (function_app.AI_LAST_START_S + classify.MAX_CALL_S + email_sender.DIGEST_TIMEOUT_S
+                + 2 * memory.BLOB_TIMEOUT_S + memory.SAVE_RETRY_DELAY_S + function_app.HEARTBEAT_TIMEOUT_S)
+    assert after_ai < limit - 30, (after_ai, limit)
 
 
 # =====================================================================================
@@ -834,7 +840,7 @@ def test_ac37_the_timer_source_has_the_documented_schedule_and_no_run_on_startup
     """AC-37 is proven by test_function_app.py (it owns the one allowed get_functions() call);
     this is a static cross-check of the decorator text, so a schedule edit is caught twice."""
     src = (ROOT / "function_app.py").read_text(encoding="utf-8")
-    assert 'schedule="0 0 6,18 * * 1-5"' in src and "run_on_startup=False" in src
+    assert 'schedule="0 0 18 * * 1-5"' in src and "run_on_startup=False" in src
     assert src.count("@app.timer_trigger") == 1
 
 

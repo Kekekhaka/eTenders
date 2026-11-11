@@ -1,6 +1,6 @@
 # eTenders digest — Azure Function
 
-Twice a day, Monday to Friday (08:00 and 20:00 SAST; no run on weekends), this Azure Function fetches the last five days of South African government tenders from the eTenders OCDS API. An AI model decides which open tenders fit a data-engineering and BI profile, and keywords are only the fallback. It then emails a ranked HTML summary plus an xlsx. The running cost is about R1 a month.
+Once a day, Monday to Friday at 20:00 SAST (no run on weekends), this Azure Function fetches the last five days of South African government tenders from the eTenders OCDS API. An AI model decides which open tenders fit a data-engineering and BI profile, and keywords are only the fallback. It then emails a ranked HTML summary plus an xlsx. The running cost is about R1 a month.
 
 The eTenders API is unreliable. It is called one day at a time, newest first, under a time budget. It answers HTTP 500 when a page contains a record it cannot serve, so a failing page is split in halves until the bad record is alone and only that record is skipped (ADR-0029). The email footer says how many records were skipped. If a whole day cannot be fetched (the server is down, or a timeout), the email still goes out, marked **Partial digest** and naming the missing dates, and later runs try that day again.
 
@@ -24,7 +24,7 @@ Keyword score (`KEYWORDS` in `pipeline.py`) still orders the list. The consultin
 - **Fallback:** gpt-5-nano on Azure OpenAI (`etenders-ai`), reached with the Function's managed identity, so no key is stored. It is capped at **R0.20 per run**. It is used only when Cloudflare fails or the daily allowance runs out.
 - **If neither answers:** the tender falls back to its keyword result and is retried on the next run.
 - **Verdicts are remembered** in the run memory for 14 days, so each tender is judged once.
-- **Time limit:** at most 90 s per run, and no AI call starts later than 480 s into the run. The Function timeout is 10 minutes.
+- **Time limit:** at most 240 s per run, and no AI call starts later than 400 s into the run, so the email and the memory write still fit in the Function's 10-minute timeout. Tenders not judged in time are judged on the next run.
 - **Off switch:** set `LLM_ENABLED` to anything other than `true`. No deploy is needed.
 
 The choice of model comes from a test on 144 hand-labelled tenders, using `tools/phase2_compare.py`. Llama 70B found 4 of 4 relevant tenders, Llama 8B and nano found 3 of 4 each (nano with the most false alarms), and the keywords found 1.
@@ -33,7 +33,7 @@ The choice of model comes from a test on 144 hand-labelled tenders, using `tools
 
 | File | Purpose |
 |------|---------|
-| `function_app.py` | Timer trigger at 06:00 and 18:00 UTC, Monday to Friday. Runs the whole job: read memory, fetch, AI step, build, send the email, save memory, log one `RUN_SUMMARY` line. |
+| `function_app.py` | Timer trigger at 18:00 UTC (20:00 SAST), Monday to Friday. Runs the whole job: read memory, fetch, AI step, build, send the email, save memory, log one `RUN_SUMMARY` line. |
 | `pipeline.py` | Fetches day by day, validates fields, keeps the open tenders the AI approves (keywords as fallback), scores and orders them. |
 | `classify.py` | The AI step: Cloudflare Llama first, Azure nano as fallback, with the cost cap and time limit. |
 | `memory.py` | State between runs: tenders already sent, dates covered, AI verdicts. In Azure it's a blob reached with the managed identity; locally it's a JSON file. |
@@ -74,7 +74,7 @@ python TG.py                 # builds etenders_matches.xlsx and etenders_digest.
    - `LLM_ENABLED=true`, `CF_ACCOUNT_ID`, `CF_API_TOKEN` (needs Workers AI permission), `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT=gpt-5-nano`.
    - `HEARTBEAT_URL` (optional): a Healthchecks.io ping URL. Off by default.
 2. **Access:** the Function's managed identity needs **Storage Blob Data Contributor** on the memory container, and **Cognitive Services OpenAI User** on `etenders-ai`. Both are already granted.
-3. **Deploy:** push to `main`. GitHub Actions runs the tests, then deploys. Don't push between 05:45–06:15 or 17:45–18:15 UTC, because a deploy then would kill a run in progress.
+3. **Deploy:** push to `main`. GitHub Actions runs the tests, then deploys. Don't push between 17:45 and 18:15 UTC on a weekday, because a deploy then would kill a run in progress.
 4. **After every deploy,** check the timer is registered:
    `az functionapp function list -g etenders-rg -n etenders-digest-func --query "[].name" -o tsv`
    It must list `etenders_digest`. If it's empty, re-sync the triggers, or scheduled runs never fire:

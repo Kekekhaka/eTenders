@@ -540,12 +540,13 @@ def test_save_and_load_round_trip_through_a_file(tmp_path):
     assert loaded == original
 
 
-# --- Monday to Friday runs (ADR-0002) ------------------------------------------------
+# --- one run a weekday, Monday to Friday (ADR-0002) ------------------------------------
 
 @pytest.mark.real_tuning
-def test_runs_on_weekdays_only_never_name_a_weekend_day_as_missed():
-    """Three weeks of runs at 06:00 and 18:00 UTC, Monday to Friday, every fetch
-    completing. Saturday and Sunday are never run on; Monday's window reaches them."""
+def test_one_run_each_weekday_never_names_a_weekend_day_or_friday_as_missed():
+    """Three weeks of runs at 18:00 UTC (20:00 SAST), Monday to Friday, every fetch
+    completing. Nothing runs on Saturday or Sunday; Monday's window reaches back over
+    the weekend, and Friday's own run only sees Friday partly (it has not ended)."""
     mem_state = None
     start = dt.date(2026, 10, 5)  # a Monday
     runs = 0
@@ -553,16 +554,17 @@ def test_runs_on_weekdays_only_never_name_a_weekend_day_as_missed():
         day = start + dt.timedelta(days=offset)
         if day.weekday() >= 5:
             continue
-        for hour in (6, 18):
-            run_at = dt.datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
-            window = pipeline.window_for(run_at)
-            results = [DayResult(window[1] - dt.timedelta(days=i), True, None)
-                       for i in range((window[1] - window[0]).days + 1)]
-            if mem_state is not None:
-                assert memory.missed_days(mem_state, window) == [], (run_at, window)
-            mem_state = memory.after_delivery(mem_state, FakeDigest(window=window), results, run_at)
-            runs += 1
-            if day.weekday() == 0 and hour == 6:  # Monday morning reaches back over the weekend
-                for back in (1, 2):
-                    assert mem_state["days"][day - dt.timedelta(days=back)] == "covered"
-    assert runs == 30
+        run_at = dt.datetime(day.year, day.month, day.day, 18, tzinfo=UTC)
+        window = pipeline.window_for(run_at)
+        results = [DayResult(window[1] - dt.timedelta(days=i), True, None)
+                   for i in range((window[1] - window[0]).days + 1)]
+        if mem_state is not None:
+            assert memory.missed_days(mem_state, window) == [], (run_at, window)
+        mem_state = memory.after_delivery(mem_state, FakeDigest(window=window), results, run_at)
+        runs += 1
+        if day.weekday() == 0 and offset > 0:
+            # Monday's run completes Friday, Saturday and Sunday.
+            for back in (1, 2, 3):
+                assert mem_state["days"][day - dt.timedelta(days=back)] == "covered"
+        assert mem_state["days"][day] == "partial"  # today has not ended when the run starts
+    assert runs == 15

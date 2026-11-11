@@ -36,7 +36,7 @@ MISSED_REPORT_DAYS = 5     # name a permanently missed day for this many days
 # degraded. At the bad end a whole 5-day window cannot be fetched inside the
 # Consumption plan's 10-minute ceiling at any timeout, so the window is
 # fetched one day at a time, newest first, under a wall-clock budget. Runs
-# happen twice daily, so older days have already been collected by earlier
+# happen once on every weekday, so older days have already been collected by earlier
 # runs and are the right thing to drop when time runs out.
 #
 # PageSize is an upper bound only: a page returns an arbitrary number of

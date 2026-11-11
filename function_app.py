@@ -1,4 +1,4 @@
-"""The Azure Function: a timer that runs the eTenders digest twice a day, Monday to Friday.
+"""The Azure Function: a timer that runs the eTenders digest once a day, at 20:00 SAST, Monday to Friday.
 
 run() is the whole run, written so tests can drive it with fakes:
 read the memory, fetch, build the digest, send it, save the memory (only
@@ -36,7 +36,8 @@ HEARTBEAT_PREFIX = "https://hc-ping.com/"
 HEARTBEAT_TIMEOUT_S = 5
 REASON_CHARS = 60        # a day's reason in RUN_SUMMARY is cut to this length
 MISSED_NAMED_CAP = 10    # at most this many missed days are listed in RUN_SUMMARY
-AI_LAST_START_S = 480    # no AI call starts later than this into the run (timeout is 600 s)
+AI_LAST_START_S = 400    # no AI call starts later than this into the run (timeout is 600 s);
+                         # test_the_run_fits_the_function_timeout_in_the_worst_case checks the sum
 
 app = func.FunctionApp()
 
@@ -210,9 +211,9 @@ def run(run_at: dt.datetime, store, send_report, send_failure_notice, ping,
     return summary
 
 
-# 06:00 and 18:00 UTC = 08:00 and 20:00 SAST (UTC+2), Monday to Friday (ADR-0002).
+# 18:00 UTC = 20:00 SAST (UTC+2), Monday to Friday (ADR-0002).
 # Monday's run still reaches the weekend: its window starts four days back.
-@app.timer_trigger(schedule="0 0 6,18 * * 1-5", arg_name="timer", run_on_startup=False)
+@app.timer_trigger(schedule="0 0 18 * * 1-5", arg_name="timer", run_on_startup=False)
 def etenders_digest(timer: func.TimerRequest, context: func.Context) -> None:
     run(
         dt.datetime.now(dt.timezone.utc),
