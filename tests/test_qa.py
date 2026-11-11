@@ -814,6 +814,10 @@ def test_the_run_fits_the_function_timeout_in_the_worst_case():
     after_ai = (function_app.AI_LAST_START_S + classify.MAX_CALL_S + email_sender.DIGEST_TIMEOUT_S
                 + 2 * memory.BLOB_TIMEOUT_S + memory.SAVE_RETRY_DELAY_S + function_app.HEARTBEAT_TIMEOUT_S)
     assert after_ai < limit - 30, (after_ai, limit)
+    # Briefs (ADR-0030) never run past BRIEF_DEADLINE_S: every download and model call is clipped to it.
+    after_briefs = (function_app.BRIEF_DEADLINE_S + 1 + email_sender.DIGEST_TIMEOUT_S
+                    + 2 * memory.BLOB_TIMEOUT_S + memory.SAVE_RETRY_DELAY_S + function_app.HEARTBEAT_TIMEOUT_S)
+    assert after_briefs < limit - 30, (after_briefs, limit)
 
 
 # =====================================================================================

@@ -20,7 +20,8 @@ def pytest_configure(config):
 
 # Settings the AI step reads; a developer's shell may have them set.
 AI_SETTINGS = ("LLM_ENABLED", "CF_ACCOUNT_ID", "CF_API_TOKEN",
-               "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_KEY")
+               "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_KEY",
+               "BRIEFS_ENABLED")
 
 
 @pytest.fixture(autouse=True)

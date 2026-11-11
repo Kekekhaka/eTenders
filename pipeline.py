@@ -441,7 +441,7 @@ def flatten(rel: object) -> dict | None:
 
 # The columns flatten produces: TENDER_COLUMNS without the flags added later.
 _FLAT_COLUMNS = [c for c in TENDER_COLUMNS
-                 if c not in ("days_left", "closing_soon", "is_new", "ai_flag")]
+                 if c not in ("days_left", "closing_soon", "is_new", "ai_flag", "brief")]
 
 AI_DESCRIPTION_CHARS = 600
 # ai_flag values: who decided that a tender is in the digest (ADR-0028);
@@ -464,6 +464,26 @@ def ai_candidates(releases: list, run_at: dt.datetime) -> list[dict]:
         out.append({"ocid": row["ocid"], "title": row["title"], "buyer": row["buyer"],
                     "category": row["category"],
                     "description": description[:AI_DESCRIPTION_CHARS]})
+    return out
+
+
+def tender_documents(releases: list, run_at: dt.datetime, ocids) -> list[dict]:
+    """For each open tender in `ocids`, its title and documents, for a brief
+    (ADR-0030): dicts of ocid, title and docs (title and url; unsafe links
+    left out). One per ocid, in the order of `releases`."""
+    wanted, out = set(ocids), []
+    for rel in releases:
+        row = flatten(rel)
+        if row is None or row["ocid"] not in wanted:
+            continue
+        wanted.discard(row["ocid"])
+        if not pd.isna(row["closing"]) and row["closing"] < run_at:
+            continue
+        docs = _obj(rel.get("tender")).get("documents")
+        docs = [{"title": _text(d.get("title")) or "", "url": d.get("url")}
+                for d in (docs if isinstance(docs, list) else [])
+                if isinstance(d, dict) and is_safe_url(d.get("url"))]
+        out.append({"ocid": row["ocid"], "title": row["title"] or "", "docs": docs})
     return out
 
 
@@ -558,15 +578,19 @@ def _flag_and_sort(df: pd.DataFrame, memory: dict | None, status: str,
 
 def build_digest(releases: list, day_results: list[DayResult], memory: dict | None,
                  memory_status: str, heartbeat: str, run_at: dt.datetime,
-                 missed: list[MissedDay] = (), ai: dict | None = None) -> Digest:
+                 missed: list[MissedDay] = (), ai: dict | None = None,
+                 briefs: dict | None = None) -> Digest:
     """Everything one email says, computed once from one clock (run_at).
     Pure: no I/O. memory_status is memory.load's status; any
     "unavailable:<reason>" becomes "unavailable" here (the reason goes to
     RUN_SUMMARY only). `missed` is memory.missed_days(...), passed in so that
-    this module never imports memory.py. ai: the AI verdicts, see _select."""
+    this module never imports memory.py. ai: the AI verdicts, see _select.
+    briefs maps ocid to a short summary of its documents (ADR-0030)."""
     window = window_for(run_at)
     status = "unavailable" if memory_status.startswith("unavailable") else memory_status
     df, rejected, dropped = _select(releases, run_at, ai)
+    df["brief"] = pd.Series([(briefs or {}).get(o) for o in df["ocid"]], index=df.index, dtype=object)
+    rejected = rejected.assign(brief=pd.Series(None, index=rejected.index, dtype=object))
     df = _flag_and_sort(df, memory, status, run_at)
 
     partial = sorted((PartialDay(r.day, r.reason) for r in day_results

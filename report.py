@@ -206,6 +206,10 @@ def _row(r, run_year: int) -> str:
     title = _e(r.title)
     if notes:
         title += f"<br><span{_SMALL}>{' · '.join(notes)}</span>"
+    if isinstance(r.brief, str) and r.brief.strip():
+        lines = "<br>".join(_e(line) for line in r.brief.splitlines() if line.strip())
+        title += (f'<br><span style="color:{_INK};font-size:{_SIZE_SMALL};line-height:1.4;">'
+                  f"<strong>Brief</strong><br>{lines}</span>")
 
     document = _link(r.document_urls[0], "View document") if r.document_urls else f"<span{_SMALL}>none</span>"
 
@@ -270,6 +274,9 @@ def _footer(d: Digest) -> list[str]:
     if d.dropped_releases > 0:
         lines.append(_e(f"{int(d.dropped_releases)} malformed release(s) from the eTenders API "
                         "were left out."))
+    if d.tenders["brief"].notna().any():
+        lines.append("Briefs are short AI summaries of each tender's documents. They can miss or "
+                     "misread details, so check the tender documents before you bid.")
     if d.skipped_releases > 0:
         lines.append(_e(f"{int(d.skipped_releases)} tender record(s) could not be read because the "
                         "eTenders API returns an error for them. They are left out, so a tender may "
@@ -345,7 +352,7 @@ def render_html(d: Digest) -> str:
 _XLSX_COLUMNS = (
     ("new", 7), ("closing_soon", 13), ("days_left", 10), ("closing", 17),
     ("tender_number", 18), ("title", 60), ("buyer", 36), ("category", 26),
-    ("province", 16), ("matched_keywords", 28), ("ai_flag", 15), ("blockers", 34),
+    ("province", 16), ("matched_keywords", 28), ("ai_flag", 15), ("brief", 80), ("blockers", 34),
     ("briefing_compulsory", 20), ("method", 24), ("contact", 30), ("published", 17),
     ("score", 7), ("document", 50), ("closing_raw", 26), ("ocid", 30),
 )
@@ -376,7 +383,7 @@ def _xlsx_values(r, new_known: bool) -> list:
         None if pd.isna(r.days_left) else int(r.days_left),
         _naive_sast(r.closing),
         _text(r.tender_number), _text(r.title), _text(r.buyer), _text(r.category),
-        _text(r.province), _text(r.matched_keywords), _text(r.ai_flag), _text(r.blockers),
+        _text(r.province), _text(r.matched_keywords), _text(r.ai_flag), _text(r.brief), _text(r.blockers),
         briefing,
         _text(r.method), _text(r.contact),
         _naive_sast(r.published),

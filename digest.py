@@ -43,6 +43,7 @@ TENDER_COLUMNS = (
     "matched_keywords",
     "ai_flag",  # who decided: "Llama", "nano", "not AI-checked" (keyword fallback); None when the AI is off
     "blockers",
+    "brief",  # a short AI summary of the tender's documents (ADR-0030); None when there is none
     "closing",
     "published",
     "closing_raw",

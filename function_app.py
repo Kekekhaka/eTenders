@@ -23,6 +23,7 @@ import azure.functions as func
 import requests
 
 import classify
+import documents
 import email_sender
 import memory
 import pipeline
@@ -38,6 +39,8 @@ REASON_CHARS = 60        # a day's reason in RUN_SUMMARY is cut to this length
 MISSED_NAMED_CAP = 10    # at most this many missed days are listed in RUN_SUMMARY
 AI_LAST_START_S = 350    # no AI call starts later than this into the run (timeout is 600 s);
                          # test_the_run_fits_the_function_timeout_in_the_worst_case checks the sum
+BRIEF_DEADLINE_S = 420   # briefs (ADR-0030) stop by this many seconds into the run; same test
+MAX_BRIEFS_PER_RUN = 6   # new AI-approved tenders briefed in one run (about 2 a day in November 2026)
 
 app = func.FunctionApp()
 
@@ -124,6 +127,27 @@ def _classify(releases: list, mem: dict | None, run_at: dt.datetime,
     return {**remembered, **new}, new
 
 
+def briefs_enabled() -> bool:
+    return os.environ.get("BRIEFS_ENABLED", "").strip().lower() == "true"
+
+
+def _briefs(releases: list, verdicts: dict | None, mem: dict | None, run_at: dt.datetime,
+            summary: dict, started: float) -> dict:
+    """A short summary of each new AI-approved tender's documents (ADR-0030),
+    keyed by ocid. Only a tender's first digest gets one, so nothing is stored."""
+    if verdicts is None or not briefs_enabled():
+        summary["briefs"] = "off"
+        return {}
+    sent = mem["sent"] if mem else {}
+    approved_new = [o for o, v in verdicts.items() if v["v"] and o not in sent]
+    items = pipeline.tender_documents(releases, run_at, approved_new)[:MAX_BRIEFS_PER_RUN]
+    made, stats = classify.briefs(
+        items, lambda item, deadline: documents.scope_text(item["docs"], deadline),
+        deadline=started + BRIEF_DEADLINE_S)
+    summary["briefs"] = stats
+    return made
+
+
 def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_id: str,
                     summary: dict) -> None:
     """Steps 2 to 6: memory, fetch, digest, send, save. Fills in summary as it goes."""
@@ -138,9 +162,10 @@ def _deliver_digest(run_at: dt.datetime, store, send_report, hb_state: str, run_
     summary["days"] = [_day_summary(r) for r in days]
 
     verdicts, ai_new = _classify(releases, mem, run_at, summary, started)
+    briefs = _briefs(releases, verdicts, mem, run_at, summary, started)
 
     missed = memory.missed_days(mem, window)
-    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed, verdicts)
+    d = pipeline.build_digest(releases, days, mem, status, hb_state, run_at, missed, verdicts, briefs)
     summary["dropped_releases"] = d.dropped_releases
     summary["counts"] = {"total": d.total, "new": d.new_count, "closing_soon": d.closing_soon_count}
     summary["missed_named"] = [m.day.isoformat() for m in d.missed_days[:MISSED_NAMED_CAP]]
@@ -176,7 +201,7 @@ def run(run_at: dt.datetime, store, send_report, send_failure_notice, ping,
         "v": 1, "run_id": run_id,
         "started_at": run_at.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": None, "past_due": past_due, "window": None, "days": None,
-        "dropped_releases": None, "counts": None, "missed_named": None, "ai": None,
+        "dropped_releases": None, "counts": None, "missed_named": None, "ai": None, "briefs": None,
         "memory": {"read": None, "write": None}, "email": None,
         "outcome": None, "error": None, "heartbeat": None,
     }

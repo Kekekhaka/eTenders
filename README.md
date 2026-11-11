@@ -30,12 +30,28 @@ Keyword score (`KEYWORDS` in `pipeline.py`) still orders the list. The consultin
 
 The choice of model comes from a test on 144 hand-labelled tenders, using `tools/phase2_compare.py`. Llama 70B found 4 of 4 relevant tenders, Llama 8B and nano found 3 of 4 each (nano with the most false alarms), and the keywords found 1.
 
+## Briefs from the tender documents (`documents.py`, ADR-0030)
+
+Off until `BRIEFS_ENABLED=true`. For each **new** tender the AI approved (at most 6 a run), the run
+downloads its documents from the eTenders portal, finds the scope of work, and asks Llama (then nano)
+for a six-line brief: Scope, Deliverables, Duration, Requirements, Briefing, Evaluation. It appears
+under the title in the email and in the xlsx `brief` column.
+
+- **What it reads:** PDF and Word files. Scanned PDFs and `.zip` folders are not read (about 4 in 19
+  tenders in the November 2026 survey); those tenders get no brief.
+- **Cost:** about 250 neurons a brief on the free Cloudflare plan; nano fallback about R0.008 a brief,
+  capped at R0.10 a run.
+- **Safety:** only https links on `www.etenders.gov.za`, size-capped, never saved to disk; the document
+  text is passed to the model as untrusted data, and the brief is escaped in the email.
+- **Check it:** the brief can miss or misread details. Compare the first few with the documents.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `function_app.py` | Timer trigger at 18:00 UTC (20:00 SAST), Monday to Friday. Runs the whole job: read memory, fetch, AI step, build, send the email, save memory, log one `RUN_SUMMARY` line. |
 | `pipeline.py` | Fetches day by day, validates fields, keeps the open tenders the AI approves (keywords as fallback), scores and orders them. |
+| `documents.py` | Downloads a tender's documents and returns the text from its scope of work, for the brief. |
 | `classify.py` | The AI step: Cloudflare Llama first, Azure nano as fallback, with the cost cap and time limit. |
 | `memory.py` | State between runs: tenders already sent, dates covered, AI verdicts. In Azure it's a blob reached with the managed identity; locally it's a JSON file. |
 | `report.py` | Renders the HTML email, the subject line and the xlsx. Does no I/O. |
@@ -73,6 +89,7 @@ python TG.py                 # builds etenders_matches.xlsx and etenders_digest.
 1. **Settings** on the Function App. Set them with `az functionapp config appsettings set ... -o none` and never commit them.
    - `ACS_CONNECTION_STRING`, `SENDER_EMAIL` (`DoNotReply@...azurecomm.net`), `RECIPIENT_EMAIL` (comma-separated).
    - `LLM_ENABLED=true`, `CF_ACCOUNT_ID`, `CF_API_TOKEN` (needs Workers AI permission), `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT=gpt-5-nano`.
+   - `BRIEFS_ENABLED=true` (optional): briefs from the tender documents.
    - `HEARTBEAT_URL` (optional): a Healthchecks.io ping URL. Off by default.
 2. **Access:** the Function's managed identity needs **Storage Blob Data Contributor** on the memory container, and **Cognitive Services OpenAI User** on `etenders-ai`. Both are already granted.
 3. **Deploy:** push to `main`. GitHub Actions runs the tests, then deploys. Don't push between 17:45 and 18:15 UTC on a weekday, because a deploy then would kill a run in progress.
@@ -129,7 +146,7 @@ Prices are from the Azure Retail Prices API (ZAR, South Africa North) and Cloudf
 
 ## Decisions and history
 
-- **Architecture decisions:** `docs/adr/` (ADR-0026 is the cost guardrail, ADR-0027 the AI step, ADR-0028 the AI as decider, ADR-0029 skipping bad API records).
+- **Architecture decisions:** `docs/adr/` (ADR-0026 is the cost guardrail, ADR-0027 the AI step, ADR-0028 the AI as decider, ADR-0029 skipping bad API records, ADR-0030 briefs from tender documents).
 - **Team decisions:** `docs/cosmos/TEAM_LEADER_DECISIONS.md`.
 - **Sign-off:** `docs/cosmos/SIGN_OFF.md`.
 - **Specification:** `docs/cosmos/REQUIREMENTS_PACK.md`, `DESIGN_SPEC.md`, `API_CONTRACT.md`.
